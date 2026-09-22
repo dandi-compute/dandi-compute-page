@@ -3,7 +3,7 @@ name: run-dashboard
 description: Launch and drive this static dashboard in a real browser with stubbed external data. Use when running or screenshotting the app locally, or when verifying that a change to src/app.js works in the running app (not just in vitest).
 ---
 
-# Running and driving the aind-page dashboard in a browser
+# Running and driving the dandi-compute-page dashboard in a browser
 
 The app is a static page (`src/index.html` + `src/app.js`, no build step). All data
 comes from external hosts fetched client-side, so running it locally = serve `src/`,
@@ -29,7 +29,7 @@ open it in Chromium, and stub the external endpoints at the network boundary.
      manifest response is `[{"path": "derivatives/state.tsv", "contentUrl": [..., "<blob
      url>"]}]`, and the blob URL response is the table itself — plain tab-separated, one
      row per attempt capsule, header + rows matching `_STATE_TSV_FIELD_NAMES` in
-     dandi-compute/code's `_queue_state.py`; nested path/content-id maps
+     dandi-compute/dandi-compute-core's `_queue_state.py`; nested path/content-id maps
      (`dataset_description_path`, `output_paths`, `log_paths`) are compact-JSON cells,
      booleans are Python's `str(bool)` (`"True"`/`"False"`).
    - `https://dandiarchive.s3.amazonaws.com/dandisets/001873/draft/assets.jsonld` — same

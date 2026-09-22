@@ -1,5 +1,5 @@
 {
-    "name": "aind-page",
+    "name": "dandi-compute-page",
     "version": "1.0.1",
     "description": "Simple webpage rendering the basic aspects of DANDI Compute - AIND.",
     "main": "src/app.js",
@@ -10,16 +10,16 @@
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/dandi-compute/aind-page.git"
+        "url": "git+https://github.com/dandi-compute/dandi-compute-page.git"
     },
     "keywords": [],
     "author": "",
     "license": "MIT",
     "type": "commonjs",
     "bugs": {
-        "url": "https://github.com/dandi-compute/aind-page/issues"
+        "url": "https://github.com/dandi-compute/dandi-compute-page/issues"
     },
-    "homepage": "https://github.com/dandi-compute/aind-page#readme",
+    "homepage": "https://github.com/dandi-compute/dandi-compute-page#readme",
     "devDependencies": {
         "@vitest/coverage-v8": "^5.0.0",
         "jsdom": "^29.1.0",

@@ -37,7 +37,7 @@ describe("app integration behavior", () => {
             pipelineVersion: "v1",
             paramsProfile: "params-a",
             configHash: "config-a",
-            generatedBy: [{ CodeURL: "https://github.com/dandi-compute/code", Version: "abc1234" }],
+            generatedBy: [{ CodeURL: "https://github.com/dandi-compute/dandi-compute-core", Version: "abc1234" }],
             status: "failed",
             failureStep: "pre-processing",
         };
@@ -48,7 +48,7 @@ describe("app integration behavior", () => {
             pipelineVersion: "v2",
             paramsProfile: "params-b",
             configHash: "config-b",
-            generatedBy: [{ CodeURL: "https://github.com/dandi-compute/code", Version: "def5678" }],
+            generatedBy: [{ CodeURL: "https://github.com/dandi-compute/dandi-compute-core", Version: "def5678" }],
             status: "success",
             failureStep: null,
         };
@@ -724,7 +724,12 @@ describe("progressive queue loading", () => {
                     () =>
                         new Response(
                             JSON.stringify({
-                                GeneratedBy: [{ CodeURL: "https://github.com/dandi-compute/code", Version: "abc1234" }],
+                                GeneratedBy: [
+                                    {
+                                        CodeURL: "https://github.com/dandi-compute/dandi-compute-core",
+                                        Version: "abc1234",
+                                    },
+                                ],
                             }),
                             { status: 200 }
                         ),
