@@ -1,4 +1,4 @@
-# DANDI Compute: AIND Ephys webpage
+# DANDI Compute (Page)
 
 Simple webpage rendering the basic aspects of the **DANDI Compute: AIND Ephys** project.
 
