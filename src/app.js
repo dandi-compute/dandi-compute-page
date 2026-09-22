@@ -26,12 +26,12 @@ const CDN_BASE = `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}`;
    backend) before it can be fetched. See resolveAssetBlobUrl below. */
 const ARCHIVE_DANDISET_ID = "001873";
 const STATE_TSV_RELATIVE_PATH = "derivatives/state.tsv";
-/* Pipeline scheduling config, packaged with dandi-compute/code (formerly a
+/* Pipeline scheduling config, packaged with dandi-compute/dandi-compute-core (formerly a
    queue_config.json living only in the now-retired dandi-compute/queue repo). */
 const PIPELINE_CONFIGS_URL =
-    "https://raw.githubusercontent.com/dandi-compute/code/main/src/dandi_compute_code/queue/pipeline_configs.json";
+    "https://raw.githubusercontent.com/dandi-compute/dandi-compute-core/main/src/dandi_compute_code/queue/pipeline_configs.json";
 const PIPELINE_CONFIGS_SOURCE_URL =
-    "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/queue/pipeline_configs.json";
+    "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/queue/pipeline_configs.json";
 
 const GITHUB_API_BASE = `https://api.github.com/repos/${OWNER}/${REPO}`;
 
@@ -42,9 +42,9 @@ const QUALIFYING_CONTENT_IDS_README_URL =
 
 const PIPELINE_REPO_URL = "https://github.com/AllenNeuralDynamics/aind-ephys-pipeline";
 const PIPELINE_API_BASE = "https://api.github.com/repos/AllenNeuralDynamics/aind-ephys-pipeline";
-const CODE_REPO_URL = "https://github.com/dandi-compute/code";
+const CODE_REPO_URL = "https://github.com/dandi-compute/dandi-compute-core";
 const AIND_EPHYS_PIPELINE_CODE_URL =
-    "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline";
+    "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline";
 const PARAMS_SCHEMA_URL =
     "https://raw.githubusercontent.com/AllenNeuralDynamics/aind-ephys-pipeline/main/pipeline/default_params_schema.json";
 const PARAMS_PLACEHOLDER_URL =
@@ -52,7 +52,10 @@ const PARAMS_PLACEHOLDER_URL =
 const REGISTRY_FALLBACK_ALIAS_PRIORITY = 1;
 const MIN_SHORT_COMMIT_HASH_LENGTH = 6;
 const FULL_COMMIT_HASH_LENGTH = 40;
-const DANDI_CODE_REPO_PATTERN = /github\.com\/dandi-compute\/code(?:\/|$)/;
+/* Matches both the current dandi-compute/dandi-compute-core repo and its former
+   dandi-compute/code name, which is still baked into the provenance of runs
+   already published to the archive. */
+const DANDI_CODE_REPO_PATTERN = /github\.com\/dandi-compute\/(?:dandi-compute-core|code)(?:\/|$)/;
 const ROOT_DIFF_PATH_LABEL = "(root)";
 const COMMIT_HASH_PATTERN = new RegExp(`^[0-9a-f]{${MIN_SHORT_COMMIT_HASH_LENGTH},${FULL_COMMIT_HASH_LENGTH}}$`, "i");
 const REGISTERED_PARAMS_PATH = "src/dandi_compute_code/aind_ephys_pipeline/registries/registered_params.json";
@@ -164,7 +167,7 @@ function codeRepoBlobUrl(path) {
 }
 
 function codeRepoRawUrl(path) {
-    return `https://raw.githubusercontent.com/dandi-compute/code/main/${path.split("/").map(encodeURIComponent).join("/")}`;
+    return `https://raw.githubusercontent.com/dandi-compute/dandi-compute-core/main/${path.split("/").map(encodeURIComponent).join("/")}`;
 }
 
 function dandiBaseUrl(_dandisetId) {
@@ -189,7 +192,7 @@ function parseFilter() {
     };
 }
 
-// Extract a stable hash-like identifier for the dandi-compute/code source
+// Extract a stable hash-like identifier for the dandi-compute/dandi-compute-core source
 // backing a run. Prefer explicit commit-looking versions, then commit-like
 // `+hash` segments, and finally fall back to the raw version text.
 function runDandiCodebaseHash(run) {
@@ -1129,7 +1132,9 @@ async function fetchDandiText(url, context) {
     const resp = await cachedFetch(url);
     if (resp.ok) return resp.text();
     if (resp.status === 403) {
-        throw new Error(`Access denied while loading ${context} (HTTP 403) — the Dandiset may be embargoed or restricted.`);
+        throw new Error(
+            `Access denied while loading ${context} (HTTP 403) — the Dandiset may be embargoed or restricted.`
+        );
     }
     if (resp.status === 429) {
         throw new Error("DANDI archive rate limit exceeded. Please try again in a few minutes.");
@@ -1659,7 +1664,7 @@ function renderSummary(runs) {
 }
 
 /* ─── Queue priorities (top display) ─────────────────────────────
-   Fetches dandi-compute/code's pipeline_configs.json from the raw GitHub CDN
+   Fetches dandi-compute/dandi-compute-core's pipeline_configs.json from the raw GitHub CDN
    and renders the current scheduling priorities at the top of the dashboard.
    The config schema isn't fixed here, so rendering adapts: an ordered priority
    list (with any scalar settings) when one can be detected, otherwise a generic
@@ -1772,7 +1777,7 @@ function renderQueueConfigGeneric(config) {
     return `<div class="qp-generic">${rows}</div>`;
 }
 
-// Field descriptions from the queue_config LinkML schema (dandi-compute/code),
+// Field descriptions from the queue_config LinkML schema (dandi-compute/dandi-compute-core),
 // surfaced as hover tooltips via small info icons.
 const QUEUE_CONFIG_DESCRIPTION =
     "A configuration structure for DANDI Compute pipelines, including version priorities, parameter priorities, attempt limits, and asset overrides.";
@@ -4564,8 +4569,8 @@ function buildParamsForm() {
 }
 
 function renderParamsEditorShell() {
-    const readmeUrl = "https://github.com/dandi-compute/code#contributing-non-code-files";
-    const codeRepoUrl = "https://github.com/dandi-compute/code";
+    const readmeUrl = "https://github.com/dandi-compute/dandi-compute-core#contributing-non-code-files";
+    const codeRepoUrl = "https://github.com/dandi-compute/dandi-compute-core";
     const paramsDir = "src/dandi_compute_code/aind_ephys_pipeline/params/";
     const registryFile = "src/dandi_compute_code/aind_ephys_pipeline/registries/registered_params.json";
 
@@ -4606,7 +4611,7 @@ function renderParamsEditorShell() {
         </div>
         <div class="params-instructions-step">
             <span class="params-instructions-num">3</span>
-            <span>Open the <a href="${e(codeRepoUrl)}" target="_blank" rel="noopener">dandi-compute/code</a> repository and click <strong>Fork</strong> to create your own copy.</span>
+            <span>Open the <a href="${e(codeRepoUrl)}" target="_blank" rel="noopener">dandi-compute/dandi-compute-core</a> repository and click <strong>Fork</strong> to create your own copy.</span>
         </div>
         <div class="params-instructions-step">
             <span class="params-instructions-num">4</span>
@@ -4614,7 +4619,7 @@ function renderParamsEditorShell() {
         </div>
         <div class="params-instructions-step">
             <span class="params-instructions-num">5</span>
-            <span>Open a Pull Request from your fork back to <code>dandi-compute/code</code>. A maintainer will review and merge your file.</span>
+            <span>Open a Pull Request from your fork back to <code>dandi-compute/dandi-compute-core</code>. A maintainer will review and merge your file.</span>
         </div>
     </div>
 </div>`;

@@ -396,12 +396,16 @@ describe("app unit behavior", () => {
             {
                 paramsProfile: "4af6a25",
                 configHash: "0d4bf36",
-                generatedBy: [{ CodeURL: "https://github.com/dandi-compute/code", Version: "1.0.0+abc1234" }],
+                generatedBy: [
+                    { CodeURL: "https://github.com/dandi-compute/dandi-compute-core", Version: "1.0.0+abc1234" },
+                ],
             },
             {
                 paramsProfile: "98fd947",
                 configHash: "6568dda",
-                generatedBy: [{ CodeURL: "https://github.com/dandi-compute/code/tree/main", Version: "def5678" }],
+                generatedBy: [
+                    { CodeURL: "https://github.com/dandi-compute/dandi-compute-core/tree/main", Version: "def5678" },
+                ],
             },
             {
                 paramsProfile: "4af6a25",
@@ -411,12 +415,14 @@ describe("app unit behavior", () => {
             {
                 paramsProfile: "aa073df",
                 configHash: "6568dda",
-                generatedBy: [{ CodeURL: "https://github.com/dandi-compute/code", Version: "release-tag" }],
+                generatedBy: [
+                    { CodeURL: "https://github.com/dandi-compute/dandi-compute-core", Version: "release-tag" },
+                ],
             },
             {
                 paramsProfile: "unknown-params",
                 configHash: "unknown-config",
-                generatedBy: [{ CodeURL: "https://github.com/dandi-compute/code", Version: null }],
+                generatedBy: [{ CodeURL: "https://github.com/dandi-compute/dandi-compute-core", Version: null }],
             },
         ];
 
@@ -428,6 +434,25 @@ describe("app unit behavior", () => {
         expect(applyFilter(runs, { dandiCodebaseHash: "def5678" })).toEqual([runs[1]]);
         expect(applyFilter(runs, { dandiCodebaseHash: "release-tag" })).toEqual([runs[3]]);
         expect(applyFilter(runs, { dandiCodebaseHash: "missing" })).toEqual([]);
+    });
+
+    it("filters by dandi codebase hash for runs provenanced under the pre-rename repo name", async () => {
+        await loadFixtureRegistries();
+        const runs = [
+            {
+                paramsProfile: "4af6a25",
+                configHash: "0d4bf36",
+                generatedBy: [{ CodeURL: "https://github.com/dandi-compute/code", Version: "1.0.0+abc1234" }],
+            },
+            {
+                paramsProfile: "98fd947",
+                configHash: "6568dda",
+                generatedBy: [{ CodeURL: "https://github.com/dandi-compute/code/tree/main", Version: "def5678" }],
+            },
+        ];
+
+        expect(applyFilter(runs, { dandiCodebaseHash: "abc1234" })).toEqual([runs[0]]);
+        expect(applyFilter(runs, { dandiCodebaseHash: "def5678" })).toEqual([runs[1]]);
     });
 
     it("parses run path segments", () => {
@@ -1225,8 +1250,8 @@ describe("fetchQueueState", () => {
 
     it("caches the assets.jsonld manifest lookup with ETag-based revalidation", async () => {
         const { mock, blobUrl } = installStateTsvFetch({ dandisetId: "001697", tsvText: TSV_TEXT });
-        mock.mockImplementationOnce(async () =>
-            new Response(assetsJsonldManifest(blobUrl), { status: 200, headers: { ETag: '"manifest-v1"' } })
+        mock.mockImplementationOnce(
+            async () => new Response(assetsJsonldManifest(blobUrl), { status: 200, headers: { ETag: '"manifest-v1"' } })
         );
 
         await fetchQueueState();
@@ -1980,7 +2005,7 @@ describe("renderFlatList", () => {
         expect(html).toContain("Params:");
         expect(html).toContain(">deterministic<");
         expect(html).toContain(
-            'href="https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json"'
+            'href="https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json"'
         );
     });
 
@@ -1998,7 +2023,7 @@ describe("renderFlatList", () => {
         expect(container.textContent).toContain("Config:");
         expect(configLink).toBeTruthy();
         expect(configLink?.href).toMatch(
-            /^https:\/\/github\.com\/dandi-compute\/code\/blob\/main\/src\/dandi_compute_code\/aind_ephys_pipeline\/configs\/.+\.config$/
+            /^https:\/\/github\.com\/dandi-compute\/dandi-compute-core\/blob\/main\/src\/dandi_compute_code\/aind_ephys_pipeline\/configs\/.+\.config$/
         );
     });
 
@@ -2288,10 +2313,10 @@ describe("renderParamsGroup", () => {
         expect(html).toContain(">deterministic<");
         expect(html).toContain(">v1<");
         expect(html).toContain(
-            'href="https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json"'
+            'href="https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json"'
         );
         expect(html).toContain(
-            'href="https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config"'
+            'href="https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config"'
         );
     });
 });
@@ -2528,13 +2553,13 @@ describe("diff page helpers", () => {
                     key: "deterministic",
                     alias: "deterministic",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
                 },
                 {
                     key: "original",
                     alias: "original",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
                 },
             ],
             paramsPairs: [
@@ -2542,9 +2567,9 @@ describe("diff page helpers", () => {
                     baseAlias: "deterministic",
                     headAlias: "original",
                     baseSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
                     headSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
                     changes: [{ path: "sorter.detect_sign", left: false, right: true }],
                 },
             ],
@@ -2595,13 +2620,13 @@ describe("diff page helpers", () => {
                     key: "v0",
                     alias: "v0",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-0.config",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-0.config",
                 },
                 {
                     key: "v1",
                     alias: "v1",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config",
                 },
             ],
             configPairs: [
@@ -2609,9 +2634,9 @@ describe("diff page helpers", () => {
                     baseAlias: "v0",
                     headAlias: "v1",
                     baseSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-0.config",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-0.config",
                     headSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config",
                     changes: [
                         {
                             path: "lines 22-26",
@@ -2679,21 +2704,21 @@ describe("diff page helpers", () => {
                 alias: "default",
                 path: "name-deterministic.json",
                 sourceUrl:
-                    "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                    "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
             },
             {
                 key: "deterministic",
                 alias: "deterministic",
                 path: "name-deterministic.json",
                 sourceUrl:
-                    "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                    "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
             },
             {
                 key: "original",
                 alias: "original",
                 path: "name-original.json",
                 sourceUrl:
-                    "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
+                    "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
             },
         ]);
 
@@ -2767,13 +2792,13 @@ describe("diff modal interactions", () => {
                     key: "deterministic",
                     alias: "deterministic",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
                 },
                 {
                     key: "original",
                     alias: "original",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
                 },
             ],
             paramsPairs: [
@@ -2781,9 +2806,9 @@ describe("diff modal interactions", () => {
                     baseAlias: "deterministic",
                     headAlias: "original",
                     baseSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
                     headSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json",
                     changes: [{ path: "sorter.detect_sign", left: false, right: true }],
                 },
             ],
@@ -2806,10 +2831,10 @@ describe("diff modal interactions", () => {
         expect(document.getElementById("log-modal-title").hidden).toBe(true);
         expect(document.getElementById("log-modal-body").innerHTML).not.toContain("Registered params");
         expect(document.getElementById("log-modal-body").innerHTML).toContain(
-            '<th scope="col"><a class="diff-inline-link" href="https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json" target="_blank" rel="noopener">deterministic</a></th>'
+            '<th scope="col"><a class="diff-inline-link" href="https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json" target="_blank" rel="noopener">deterministic</a></th>'
         );
         expect(document.getElementById("log-modal-body").innerHTML).toContain(
-            '<th scope="col"><a class="diff-inline-link" href="https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json" target="_blank" rel="noopener">original</a></th>'
+            '<th scope="col"><a class="diff-inline-link" href="https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-original.json" target="_blank" rel="noopener">original</a></th>'
         );
         expect(document.getElementById("log-modal-body").innerHTML).toContain('<th scope="col">Parameter</th>');
         expect(document.getElementById("log-modal-body").textContent).toContain("sorter.detect_sign");
@@ -2834,13 +2859,13 @@ describe("diff modal interactions", () => {
                     key: "v0",
                     alias: "v0",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-0.config",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-0.config",
                 },
                 {
                     key: "v1",
                     alias: "v1",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config",
                 },
             ],
             configPairs: [
@@ -2848,9 +2873,9 @@ describe("diff modal interactions", () => {
                     baseAlias: "v0",
                     headAlias: "v1",
                     baseSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-0.config",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-0.config",
                     headSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/configs/name-mit+engaging_revision-1.config",
                     changes: [
                         {
                             path: "lines 22-26",
@@ -2928,13 +2953,13 @@ describe("diff modal interactions", () => {
                     key: "all+channels",
                     alias: "all+channels",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-all+channels.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-all+channels.json",
                 },
                 {
                     key: "deterministic",
                     alias: "deterministic",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
                 },
             ],
             paramsPairs: [
@@ -2942,9 +2967,9 @@ describe("diff modal interactions", () => {
                     baseAlias: "all+channels",
                     headAlias: "deterministic",
                     baseSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-all+channels.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-all+channels.json",
                     headSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
                     changes: [
                         {
                             path: "postprocessing.correlograms",
@@ -2995,13 +3020,13 @@ describe("diff modal interactions", () => {
                     key: "all+channels",
                     alias: "all+channels",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-all+channels.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-all+channels.json",
                 },
                 {
                     key: "deterministic",
                     alias: "deterministic",
                     sourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
                 },
             ],
             paramsPairs: [
@@ -3009,9 +3034,9 @@ describe("diff modal interactions", () => {
                     baseAlias: "all+channels",
                     headAlias: "deterministic",
                     baseSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-all+channels.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-all+channels.json",
                     headSourceUrl:
-                        "https://github.com/dandi-compute/code/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
+                        "https://github.com/dandi-compute/dandi-compute-core/blob/main/src/dandi_compute_code/aind_ephys_pipeline/params/name-deterministic.json",
                     changes: [
                         {
                             path: "preprocessing.filters",
@@ -3215,7 +3240,9 @@ describe("cachedFetch immutable blob cache", () => {
 
     it("recognizes S3 blob URLs as immutable", () => {
         expect(isImmutableBlobUrl("https://dandiarchive.s3.amazonaws.com/blobs/abc/def/abcdef123")).toBe(true);
-        expect(isImmutableBlobUrl("https://raw.githubusercontent.com/dandi-compute/code/main/x.json")).toBe(false);
+        expect(
+            isImmutableBlobUrl("https://raw.githubusercontent.com/dandi-compute/dandi-compute-core/main/x.json")
+        ).toBe(false);
         expect(isImmutableBlobUrl(null)).toBe(false);
     });
 
@@ -3252,7 +3279,7 @@ describe("cachedFetch immutable blob cache", () => {
     });
 
     it("still revalidates non-blob URLs with If-None-Match", async () => {
-        const url = "https://raw.githubusercontent.com/dandi-compute/code/main/some.json";
+        const url = "https://raw.githubusercontent.com/dandi-compute/dandi-compute-core/main/some.json";
         sessionStorage.setItem(
             "aind_etag:" + url,
             JSON.stringify({ etag: '"v1"', body: '{"a":1}', contentType: "application/json", status: 200 })
