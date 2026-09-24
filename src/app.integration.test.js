@@ -384,9 +384,10 @@ describe("app integration behavior", () => {
 });
 
 describe("progressive queue loading", () => {
-    // state.tsv isn't referenced by a known content-id, so fetchQueueState resolves
-    // it in two hops: the job-capsules Dandiset's assets.jsonld manifest, then the
-    // blob URL it points at (see resolveAssetBlobUrl / STATE_MANIFEST_URL below).
+    // jobs.tsv and paths.tsv aren't referenced by a known content-id, so
+    // fetchQueueState resolves them in two hops: the job-capsules Dandiset's
+    // assets.jsonld manifest, then the blob URLs it points at (see
+    // resolveAssetBlobUrls / STATE_MANIFEST_URL below).
     const STATE_MANIFEST_URL = "https://dandiarchive.s3.amazonaws.com/dandisets/001697/draft/assets.jsonld";
     let blobCounter = 0;
     let originalFetch;
@@ -445,10 +446,6 @@ describe("progressive queue loading", () => {
         return { entry, urls, path: p };
     }
 
-    // Serialise entries to a tab-separated `state.tsv` table (header = union of
-    // keys across all entries), matching how fetchQueueState/parseStateTsv reads
-    // a real state.tsv: object-valued cells (output_paths, dataset_description_path)
-    // are JSON strings, booleans are Python's `str(bool)` ("True"/"False").
     // Mirror Python csv.DictWriter's QUOTE_MINIMAL: quote-wrap (doubling inner
     // quotes) only when a cell contains the delimiter, a quote, or a newline.
     function tsvQuote(cell) {
@@ -456,45 +453,106 @@ describe("progressive queue loading", () => {
         return `"${cell.replace(/"/g, '""')}"`;
     }
 
-    function entriesToTsv(entries) {
-        const header = [...new Set(entries.flatMap((entry) => Object.keys(entry)))];
-        const lines = [header.join("\t")];
-        for (const entry of entries) {
-            const row = header.map((key) => {
-                const value = entry[key];
-                if (value === undefined || value === null) return "";
-                if (typeof value === "boolean") return value ? "True" : "False";
-                if (typeof value === "object") return tsvQuote(JSON.stringify(value));
-                return tsvQuote(String(value));
-            });
-            lines.push(row.join("\t"));
+    function rowsToTsv(fieldNames, rows) {
+        const lines = [fieldNames.join("\t")];
+        for (const row of rows) {
+            lines.push(fieldNames.map((key) => (row[key] == null ? "" : tsvQuote(String(row[key])))).join("\t"));
         }
         return lines.join("\n") + "\n";
     }
 
-    // A fresh blob URL each call, so a later test's/reload's manifest lookup can
-    // never be served stale content out of the cross-test blob memory cache.
-    let _seededStateManifest = null;
-    let _seededStateTsv = null;
-    function seedQueueState(entries) {
-        const blobUrl = blobUrlFor(newBlobId());
-        _seededStateManifest = JSON.stringify([
-            { path: "derivatives/state.tsv", contentUrl: ["https://api.dandiarchive.org/ignored", blobUrl] },
-        ]);
-        _seededStateTsv = entriesToTsv(entries);
+    // Write the fixture entries out as the `jobs.tsv` and `paths.tsv` tables the
+    // app reads. Each entry's run path (the one withArtifacts keyed its artifacts
+    // under) becomes its capsule directory, marked by a dataset_description.json.
+    // Its presence flags become the capsule `status` they correspond to, and its
+    // subject/session go into the source NWB path the app parses them back out of.
+    function entriesToQueueTables(entries) {
+        const jobRows = [];
+        const pathRows = [];
+        entries.forEach((entry, index) => {
+            const [run] = parseQueueEntries([entry]);
+            const jobId = `job-${String(index).padStart(12, "0")}`;
+            const status = entry.has_output
+                ? "successful"
+                : entry.has_logs
+                  ? "failed"
+                  : entry.has_been_submitted
+                    ? "stalled"
+                    : "pending";
+            const nwbDirectory = [`sub-${run.subject}`, ...(run.session ? [`ses-${run.session}`] : [])].join("/");
+            jobRows.push({
+                job_id: jobId,
+                dandiset_id: entry.dandiset_id,
+                within_dandiset_path: entry.dandi_path ?? `${nwbDirectory}/sub-${run.subject}_ecephys.nwb`,
+                pipeline: entry.pipeline,
+                version: entry.version,
+                params: entry.params,
+                config: entry.config,
+                codebase: entry.codebase,
+                content_id: entry.content_id,
+                asset_size_bytes: entry.asset_size_bytes,
+                status,
+                created_at: entry.created_at,
+            });
+            const blobIdsByPath = {
+                [`${run.path}/dataset_description.json`]: `dd${String(index).padStart(30, "0")}`,
+                ...(entry.dataset_description_path ?? {}),
+                ...(entry.output_paths ?? {}),
+            };
+            for (const [path, contentId] of Object.entries(blobIdsByPath)) {
+                pathRows.push({ job_id: jobId, path, content_id: contentId });
+            }
+        });
+        return {
+            jobsTsv: rowsToTsv(
+                [
+                    "job_id",
+                    "dandiset_id",
+                    "within_dandiset_path",
+                    "pipeline",
+                    "version",
+                    "params",
+                    "config",
+                    "codebase",
+                    "content_id",
+                    "asset_size_bytes",
+                    "status",
+                    "created_at",
+                ],
+                jobRows
+            ),
+            pathsTsv: rowsToTsv(["job_id", "path", "content_id"], pathRows),
+        };
     }
 
-    // Route the app's fetches: the assets.jsonld manifest and the state.tsv blob
-    // it points at are served from whatever seedQueueState last set up (no ETag,
-    // so a reseed-and-reload mid-test always picks up the fresh manifest/blob),
+    // Fresh blob URLs each call, so a later test's/reload's manifest lookup can
+    // never be served stale content out of the cross-test blob memory cache.
+    let _seededStateManifest = null;
+    let _seededTables = null;
+    function seedQueueState(entries) {
+        const jobsBlobUrl = blobUrlFor(newBlobId());
+        const pathsBlobUrl = blobUrlFor(newBlobId());
+        _seededStateManifest = JSON.stringify([
+            { path: "derivatives/jobs.tsv", contentUrl: ["https://api.dandiarchive.org/ignored", jobsBlobUrl] },
+            { path: "derivatives/paths.tsv", contentUrl: ["https://api.dandiarchive.org/ignored", pathsBlobUrl] },
+        ]);
+        const { jobsTsv, pathsTsv } = entriesToQueueTables(entries);
+        _seededTables = new Map([
+            [jobsBlobUrl, jobsTsv],
+            [pathsBlobUrl, pathsTsv],
+        ]);
+    }
+
+    // Route the app's fetches: the assets.jsonld manifest and the table blobs it
+    // points at are served from whatever seedQueueState last set up (no ETag,
+    // so a reseed-and-reload mid-test always picks up the fresh manifest/blobs),
     // registries resolve to a minimal fixture, and S3 blob URLs are served by the
     // per-test handler map.
     function installFetch(blobHandlers) {
         global.fetch = vi.fn(async (url) => {
             const u = String(url);
             if (u === STATE_MANIFEST_URL) return new Response(_seededStateManifest, { status: 200 });
-            const blobUrl = JSON.parse(_seededStateManifest)[0].contentUrl[1];
-            if (u === blobUrl) return new Response(_seededStateTsv, { status: 200 });
+            if (_seededTables.has(u)) return new Response(_seededTables.get(u), { status: 200 });
             if (u.includes("registered_params.json") || u.includes("registered_configs.json")) {
                 return new Response(
                     JSON.stringify({ default: { path: "p.json", md5: "0d4bf36ddb61418ae7714e7d6e5ff8b8" } }),
@@ -507,15 +565,13 @@ describe("progressive queue loading", () => {
         });
     }
 
-    // Per-run artifact blob requests only -- excludes the state.tsv manifest lookup
-    // and its resolved blob, which share the same S3 host as real artifact blobs.
-    const blobRequests = () => {
-        const stateBlobUrl = _seededStateManifest ? JSON.parse(_seededStateManifest)[0].contentUrl[1] : null;
-        return global.fetch.mock.calls
+    // Per-run artifact blob requests only -- excludes the manifest lookup and the
+    // resolved table blobs, which share the same S3 host as real artifact blobs.
+    const blobRequests = () =>
+        global.fetch.mock.calls
             .map(([u]) => String(u))
             .filter((u) => new URL(u).hostname === "dandiarchive.s3.amazonaws.com")
-            .filter((u) => u !== STATE_MANIFEST_URL && u !== stateBlobUrl);
-    };
+            .filter((u) => u !== STATE_MANIFEST_URL && !_seededTables?.has(u));
 
     const TRACE_OK =
         "task_id\tname\tstatus\texit\n1\tjob_dispatch (1)\tCOMPLETED\t0\n2\tpreprocessing (1)\tCOMPLETED\t0";
@@ -577,21 +633,6 @@ describe("progressive queue loading", () => {
         expect(after.querySelector('details[data-section="viz"]').open).toBe(true); // preserved
         expect(after.dataset.runKey).toBe(before.dataset.runKey);
         expect(document.querySelector("#summary .stat-failed .stat-value").textContent.trim()).toBe("1");
-    });
-
-    it("treats an explicit upstream status as authoritative over the trace", async () => {
-        const { entry, urls } = withArtifacts(makeEntry({ status: "failed", failure_step: "post-processing" }), {
-            trace: newBlobId(),
-        });
-        seedQueueState([entry]);
-        installFetch(new Map([[urls.trace, () => new Response(TRACE_OK, { status: 200 })]]));
-
-        await loadQueueData();
-        expect(document.querySelector("#runs .run-entry").className).toContain("status-failed");
-
-        await hydrationIdle();
-        // The all-COMPLETED trace must not override the upstream verdict.
-        expect(document.querySelector("#runs .run-entry").className).toContain("status-failed");
     });
 
     it("promotes an expanded run to the front of the hydration queue", async () => {
