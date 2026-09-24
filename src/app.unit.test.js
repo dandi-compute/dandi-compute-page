@@ -58,30 +58,30 @@ const {
 
 const QUEUE_STATE_CACHE_KEY = queueStateCacheKey();
 
-/** Column order for the `state.tsv` table (mirrors _STATE_TSV_FIELD_NAMES on the Python side). */
-const STATE_TSV_FIELD_NAMES = [
+/** Column order for the `jobs.tsv` table (mirrors _JOBS_TSV_FIELD_NAMES on the Python side). */
+const JOBS_TSV_FIELD_NAMES = [
+    "job_id",
     "dandiset_id",
-    "dandi_path",
+    "within_dandiset_path",
     "pipeline",
     "version",
     "params",
     "config",
-    "attempt",
     "codebase",
     "content_id",
     "asset_size_bytes",
-    "has_code",
-    "has_been_submitted",
-    "has_output",
-    "has_logs",
-    "dataset_description_path",
-    "output_paths",
-    "log_paths",
+    "status",
     "created_at",
+    "job_submission_time",
     "job_completion_time",
+    "queue_wait_seconds",
+    "run_duration_seconds",
+    "process_wall_time_seconds",
 ];
 
-/** Serialise entry dicts into a tab-separated `state.tsv` table (header + one row each). */
+/** Column order for the `paths.tsv` table (mirrors _PATHS_TSV_FIELD_NAMES on the Python side). */
+const PATHS_TSV_FIELD_NAMES = ["job_id", "path", "content_id"];
+
 /** Mirror Python csv.DictWriter's QUOTE_MINIMAL: quote-wrap (doubling inner quotes)
  * only when a cell contains the delimiter, a quote, or a newline. */
 function tsvQuote(cell) {
@@ -89,20 +89,17 @@ function tsvQuote(cell) {
     return `"${cell.replace(/"/g, '""')}"`;
 }
 
-function makeStateTsv(entries) {
-    const lines = [STATE_TSV_FIELD_NAMES.join("\t")];
-    for (const entry of entries) {
-        const row = STATE_TSV_FIELD_NAMES.map((key) => {
-            const value = entry[key];
-            if (value === undefined || value === null) return "";
-            if (typeof value === "boolean") return value ? "True" : "False";
-            if (typeof value === "object") return tsvQuote(JSON.stringify(value));
-            return tsvQuote(String(value));
-        });
-        lines.push(row.join("\t"));
+/** Serialise row objects into a tab-separated table (header + one row each). */
+function makeTsv(fieldNames, rows) {
+    const lines = [fieldNames.join("\t")];
+    for (const row of rows) {
+        lines.push(fieldNames.map((key) => (row[key] == null ? "" : tsvQuote(String(row[key])))).join("\t"));
     }
     return lines.join("\n") + "\n";
 }
+
+const makeJobsTsv = (rows) => makeTsv(JOBS_TSV_FIELD_NAMES, rows);
+const makePathsTsv = (rows) => makeTsv(PATHS_TSV_FIELD_NAMES, rows);
 
 const REGISTERED_PARAMS_FIXTURE = {
     deterministic: { path: "name-deterministic.json", md5: "4af6a25e20e376c81895ce9350a9cbd4" },
@@ -1159,27 +1156,33 @@ describe("Neurosift URL helpers", () => {
     });
 });
 
-// state.tsv isn't referenced by a known content-id (unlike a run's output
-// artifacts), so fetchQueueState/fetchArchiveState resolve it in two steps:
-// (1) fetch the Dandiset's `assets.jsonld` manifest and find the entry whose
-// `path` is "derivatives/state.tsv", (2) fetch its S3 blob contentUrl. These
-// helpers build fixtures/mocks for both steps.
+// jobs.tsv and paths.tsv aren't referenced by a known content-id (unlike a
+// run's output artifacts), so fetchQueueState/fetchArchiveState resolve them in
+// two steps: (1) fetch the Dandiset's `assets.jsonld` manifest and find the
+// entries whose `path` is "derivatives/jobs.tsv" and "derivatives/paths.tsv",
+// (2) fetch their S3 blob contentUrls. These helpers build fixtures/mocks for
+// both steps.
 // Blob URLs are cached forever in a module-level, cross-test in-memory map
 // (see clearBlobMemoryCache's docstring in app.js), so each call defaults to
-// a fresh content id -- reusing one across tests would make a later test's
+// fresh content ids -- reusing one across tests would make a later test's
 // "fetch" a stale cache hit from an earlier test's fixture.
-let _stateTsvBlobCounter = 0;
-function stateTsvBlobUrl(contentId = `sv${String(_stateTsvBlobCounter++).padStart(38, "0")}`) {
+let _tableBlobCounter = 0;
+function tableBlobUrl(contentId = `tb${String(_tableBlobCounter++).padStart(38, "0")}`) {
     return `https://dandiarchive.s3.amazonaws.com/blobs/${contentId.slice(0, 3)}/${contentId.slice(3, 6)}/${contentId}`;
 }
 
-function assetsJsonldManifest(blobUrl) {
-    return JSON.stringify([
-        {
-            path: "derivatives/state.tsv",
-            contentUrl: ["https://api.dandiarchive.org/api/assets/some-id/download/", blobUrl],
-        },
-    ]);
+function assetsJsonldManifest({ jobsBlobUrl, pathsBlobUrl }) {
+    return JSON.stringify(
+        [
+            ["derivatives/jobs.tsv", jobsBlobUrl],
+            ["derivatives/paths.tsv", pathsBlobUrl],
+        ]
+            .filter(([, blobUrl]) => blobUrl)
+            .map(([path, blobUrl]) => ({
+                path,
+                contentUrl: ["https://api.dandiarchive.org/api/assets/some-id/download/", blobUrl],
+            }))
+    );
 }
 
 function assetsJsonldUrlFor(dandisetId) {
@@ -1187,43 +1190,62 @@ function assetsJsonldUrlFor(dandisetId) {
 }
 
 // Route a mock fetch: the manifest URL for *dandisetId* serves *manifestBody*
-// (default: pointing at *blobUrl*), and *blobUrl* serves *tsvText*. Anything
-// else 404s. Returns the mock so callers can inspect its call log.
-function installStateTsvFetch({
+// (default: pointing at both blob URLs), and each blob URL serves its table.
+// Anything else 404s. Returns the mock so callers can inspect its call log.
+function installQueueTablesFetch({
     dandisetId,
-    tsvText,
-    blobUrl = stateTsvBlobUrl(),
+    jobsTsv,
+    pathsTsv = makePathsTsv([]),
+    jobsBlobUrl = tableBlobUrl(),
+    pathsBlobUrl = tableBlobUrl(),
     manifestBody,
     manifestHeaders = { ETag: '"manifest-etag"' },
 }) {
-    const manifest = manifestBody ?? assetsJsonldManifest(blobUrl);
+    const manifest = manifestBody ?? assetsJsonldManifest({ jobsBlobUrl, pathsBlobUrl });
     const mock = vi.fn(async (url) => {
         const u = String(url);
         if (u === assetsJsonldUrlFor(dandisetId)) {
             return new Response(manifest, { status: 200, headers: manifestHeaders });
         }
-        if (u === blobUrl) return new Response(tsvText, { status: 200 });
+        if (u === jobsBlobUrl) return new Response(jobsTsv, { status: 200 });
+        if (u === pathsBlobUrl) return new Response(pathsTsv, { status: 200 });
         return new Response(null, { status: 404 });
     });
     global.fetch = mock;
-    return { mock, blobUrl };
+    return { mock, jobsBlobUrl, pathsBlobUrl };
 }
 
-describe("fetchQueueState", () => {
-    const SAMPLE_ENTRY = {
-        dandiset_id: "001697",
-        dandi_path: "sub-1/sub-1_ses-1_ecephys.nwb",
-        pipeline: "ephys",
-        version: "v1",
-        params: "abc",
-        config: "def",
-        attempt: 1,
-        has_code: true,
-        has_output: false,
-        has_logs: false,
-    };
-    const TSV_TEXT = makeStateTsv([SAMPLE_ENTRY]);
+const CAPSULE_DIRECTORY =
+    "derivatives/dandisets-000/dandiset-000397/sub-Pt01/sub-Pt01_ecephys/pipeline-aind+ephys/job-26070830b5ff";
 
+const SAMPLE_JOB = {
+    job_id: "job-26070830b5ff",
+    dandiset_id: "000397",
+    within_dandiset_path: "sub-Pt01/sub-Pt01_ecephys.nwb",
+    pipeline: "aind+ephys",
+    version: "v1.2.4",
+    params: "1cbdbee",
+    config: "7940dfd",
+    codebase: "v0.3.49",
+    content_id: "c4e36f4d-132d-4153-ab18-41b46fc0ccab",
+    asset_size_bytes: 9005377211,
+    status: "successful",
+    created_at: "2026-09-17T11:52:06.988488-04:00",
+    job_submission_time: "2026-09-17T11:52:07.195344-04:00",
+    job_completion_time: "2026-09-17T11:52:10.675168-04:00",
+};
+
+const SAMPLE_PATHS = [
+    { job_id: SAMPLE_JOB.job_id, path: `${CAPSULE_DIRECTORY}/dataset_description.json`, content_id: "dd-blob" },
+    { job_id: SAMPLE_JOB.job_id, path: `${CAPSULE_DIRECTORY}/logs/trace.txt`, content_id: "trace-blob" },
+    {
+        job_id: SAMPLE_JOB.job_id,
+        path: `${CAPSULE_DIRECTORY}/derivatives/visualization/psd.png`,
+        content_id: "png-blob",
+    },
+];
+
+describe("fetchQueueState", () => {
     let originalFetch;
 
     beforeEach(() => {
@@ -1236,22 +1258,113 @@ describe("fetchQueueState", () => {
         sessionStorage.clear();
     });
 
-    it("resolves state.tsv's blob URL via assets.jsonld, then fetches and parses it", async () => {
-        installStateTsvFetch({ dandisetId: "001697", tsvText: TSV_TEXT });
+    it("resolves jobs.tsv and paths.tsv via assets.jsonld, then joins them into entries", async () => {
+        installQueueTablesFetch({
+            dandisetId: "001697",
+            jobsTsv: makeJobsTsv([SAMPLE_JOB]),
+            pathsTsv: makePathsTsv(SAMPLE_PATHS),
+        });
 
-        const result = await fetchQueueState();
+        const [entry] = await fetchQueueState();
 
-        expect(result).toHaveLength(1);
-        expect(result[0].dandiset_id).toBe("001697");
-        expect(result[0].attempt).toBe(1);
-        expect(result[0].has_code).toBe(true);
-        expect(result[0].has_output).toBe(false);
+        expect(entry.job_id).toBe("job-26070830b5ff");
+        expect(entry.dandiset_id).toBe("000397");
+        expect(entry.dandi_path).toBe("sub-Pt01/sub-Pt01_ecephys.nwb");
+        expect(entry.run_path).toBe(CAPSULE_DIRECTORY);
+        expect(entry.asset_size_bytes).toBe(9005377211);
+        expect(entry.dataset_description_path).toEqual({
+            [`${CAPSULE_DIRECTORY}/dataset_description.json`]: "dd-blob",
+        });
+        expect(entry.output_paths).toEqual({
+            [`${CAPSULE_DIRECTORY}/logs/trace.txt`]: "trace-blob",
+            [`${CAPSULE_DIRECTORY}/derivatives/visualization/psd.png`]: "png-blob",
+        });
+        expect(entry.has_output).toBe(true);
+        expect(entry.has_logs).toBe(true);
+    });
+
+    it("feeds parseQueueEntries the capsule directory and job id", async () => {
+        installQueueTablesFetch({
+            dandisetId: "001697",
+            jobsTsv: makeJobsTsv([SAMPLE_JOB]),
+            pathsTsv: makePathsTsv(SAMPLE_PATHS),
+        });
+
+        const [run] = parseQueueEntries(await fetchQueueState());
+
+        expect(run.path).toBe(CAPSULE_DIRECTORY);
+        expect(run.jobId).toBe("job-26070830b5ff");
+        expect(run.subject).toBe("Pt01");
+        expect(run.datasetDescriptionPath).toBe(`${CAPSULE_DIRECTORY}/dataset_description.json`);
+        expect(run.outputPaths[`${CAPSULE_DIRECTORY}/dataset_description.json`]).toBe("dd-blob");
+    });
+
+    it.each([
+        ["pending", [], { has_been_submitted: false, has_output: false, has_logs: false }, "queued"],
+        ["stalled", [], { has_been_submitted: true, has_output: false, has_logs: false }, "running"],
+        ["failed", [], { has_been_submitted: true, has_output: false, has_logs: true }, "failed"],
+        ["successful", [], { has_been_submitted: true, has_output: true, has_logs: false }, "success"],
+        ["successful", ["logs/trace.txt"], { has_been_submitted: true, has_output: true, has_logs: true }, "success"],
+    ])(
+        "maps a %s capsule with extra paths %j onto flags %j (page status %s)",
+        async (status, extra, flags, pageStatus) => {
+            const pathRows = [
+                { job_id: "job-1", path: "derivatives/x/job-1/dataset_description.json", content_id: "dd" },
+                ...extra.map((relative) => ({
+                    job_id: "job-1",
+                    path: `derivatives/x/job-1/${relative}`,
+                    content_id: "b",
+                })),
+            ];
+            installQueueTablesFetch({
+                dandisetId: "001697",
+                jobsTsv: makeJobsTsv([{ ...SAMPLE_JOB, job_id: "job-1", status }]),
+                pathsTsv: makePathsTsv(pathRows),
+            });
+
+            const [entry] = await fetchQueueState();
+
+            expect({
+                has_been_submitted: entry.has_been_submitted,
+                has_output: entry.has_output,
+                has_logs: entry.has_logs,
+            }).toEqual(flags);
+            expect(deriveFlagStatus(parseQueueEntries([entry])[0])).toBe(pageStatus);
+        }
+    );
+
+    it("takes the capsule's own dataset_description.json over nested ones", async () => {
+        installQueueTablesFetch({
+            dandisetId: "001697",
+            jobsTsv: makeJobsTsv([SAMPLE_JOB]),
+            pathsTsv: makePathsTsv([
+                {
+                    job_id: SAMPLE_JOB.job_id,
+                    path: `${CAPSULE_DIRECTORY}/derivatives/nwb/dataset_description.json`,
+                    content_id: "nested",
+                },
+                ...SAMPLE_PATHS,
+            ]),
+        });
+
+        const [entry] = await fetchQueueState();
+
+        expect(entry.run_path).toBe(CAPSULE_DIRECTORY);
+        expect(entry.output_paths[`${CAPSULE_DIRECTORY}/derivatives/nwb/dataset_description.json`]).toBe("nested");
     });
 
     it("caches the assets.jsonld manifest lookup with ETag-based revalidation", async () => {
-        const { mock, blobUrl } = installStateTsvFetch({ dandisetId: "001697", tsvText: TSV_TEXT });
+        const { mock, jobsBlobUrl, pathsBlobUrl } = installQueueTablesFetch({
+            dandisetId: "001697",
+            jobsTsv: makeJobsTsv([SAMPLE_JOB]),
+            pathsTsv: makePathsTsv(SAMPLE_PATHS),
+        });
         mock.mockImplementationOnce(
-            async () => new Response(assetsJsonldManifest(blobUrl), { status: 200, headers: { ETag: '"manifest-v1"' } })
+            async () =>
+                new Response(assetsJsonldManifest({ jobsBlobUrl, pathsBlobUrl }), {
+                    status: 200,
+                    headers: { ETag: '"manifest-v1"' },
+                })
         );
 
         await fetchQueueState();
@@ -1271,14 +1384,23 @@ describe("fetchQueueState", () => {
         const result = await fetchQueueState();
         expect(result).toHaveLength(1);
 
-        // ...and must not re-fetch the (content-addressed, already-cached) blob body.
-        const blobCallCount = mock.mock.calls.filter(([url]) => String(url) === blobUrl).length;
-        expect(blobCallCount).toBe(1);
+        // ...and must not re-fetch either (content-addressed, already-cached) table.
+        for (const blobUrl of [jobsBlobUrl, pathsBlobUrl]) {
+            const blobCallCount = mock.mock.calls.filter(([url]) => String(url) === blobUrl).length;
+            expect(blobCallCount).toBe(1);
+        }
     });
 
-    it("throws when derivatives/state.tsv is absent from the manifest", async () => {
-        installStateTsvFetch({ dandisetId: "001697", tsvText: TSV_TEXT, manifestBody: JSON.stringify([]) });
-        await expect(fetchQueueState()).rejects.toThrow("not found in Dandiset 001697's asset listing");
+    it.each([
+        ["derivatives/jobs.tsv", { pathsBlobUrl: tableBlobUrl(), jobsBlobUrl: null }],
+        ["derivatives/paths.tsv", { jobsBlobUrl: tableBlobUrl(), pathsBlobUrl: null }],
+    ])("throws when %s is absent from the manifest", async (missingPath, blobUrls) => {
+        installQueueTablesFetch({
+            dandisetId: "001697",
+            jobsTsv: makeJobsTsv([SAMPLE_JOB]),
+            manifestBody: assetsJsonldManifest(blobUrls),
+        });
+        await expect(fetchQueueState()).rejects.toThrow(`${missingPath} not found in Dandiset 001697's asset listing`);
     });
 
     it("throws an access-denied error when the manifest fetch returns 403", async () => {
@@ -1296,60 +1418,45 @@ describe("fetchQueueState", () => {
         await expect(fetchQueueState()).rejects.toThrow("HTTP 500");
     });
 
-    it("throws when the resolved blob itself fails to load", async () => {
-        const blobUrl = stateTsvBlobUrl();
+    it("throws when a resolved table fails to load", async () => {
+        const jobsBlobUrl = tableBlobUrl();
+        const pathsBlobUrl = tableBlobUrl();
         global.fetch = vi.fn(async (url) => {
             if (String(url) === assetsJsonldUrlFor("001697")) {
-                return new Response(assetsJsonldManifest(blobUrl), { status: 200 });
+                return new Response(assetsJsonldManifest({ jobsBlobUrl, pathsBlobUrl }), { status: 200 });
             }
             return new Response(null, { status: 500 });
         });
         await expect(fetchQueueState()).rejects.toThrow("HTTP 500");
     });
 
-    it("returns an empty array for an empty state.tsv", async () => {
-        installStateTsvFetch({ dandisetId: "001697", tsvText: "" });
+    it("returns an empty array for an empty jobs.tsv", async () => {
+        installQueueTablesFetch({ dandisetId: "001697", jobsTsv: "" });
         expect(await fetchQueueState()).toEqual([]);
     });
 
-    it("returns an empty array for a header-only state.tsv", async () => {
-        installStateTsvFetch({ dandisetId: "001697", tsvText: makeStateTsv([]) });
+    it("returns an empty array for a header-only jobs.tsv", async () => {
+        installQueueTablesFetch({ dandisetId: "001697", jobsTsv: makeJobsTsv([]) });
         expect(await fetchQueueState()).toEqual([]);
     });
 
-    it("parses RFC4180-quoted cells (JSON path maps containing embedded quotes)", async () => {
-        const entry = {
-            ...SAMPLE_ENTRY,
-            content_id: null,
-            created_at: null,
-            job_completion_time: null,
-            output_paths: { 'a/b "with quotes".json': "blob-1" },
-        };
-        installStateTsvFetch({ dandisetId: "001697", tsvText: makeStateTsv([entry]) });
+    it("parses RFC4180-quoted cells (paths containing embedded quotes)", async () => {
+        const quotedPath = `${CAPSULE_DIRECTORY}/logs/a "with quotes".txt`;
+        installQueueTablesFetch({
+            dandisetId: "001697",
+            jobsTsv: makeJobsTsv([{ ...SAMPLE_JOB, content_id: null, created_at: null }]),
+            pathsTsv: makePathsTsv([...SAMPLE_PATHS, { job_id: SAMPLE_JOB.job_id, path: quotedPath, content_id: "q" }]),
+        });
 
         const [result] = await fetchQueueState();
 
-        expect(result.output_paths).toEqual({ 'a/b "with quotes".json': "blob-1" });
+        expect(result.output_paths[quotedPath]).toBe("q");
         expect(result.content_id).toBeNull();
         expect(result.created_at).toBeNull();
     });
 });
 
 describe("fetchArchiveState", () => {
-    const SAMPLE_ENTRY = {
-        dandiset_id: "000409",
-        dandi_path: "sub-SWC-038/sub-SWC-038_ecephys.nwb",
-        pipeline: "aind+ephys",
-        version: "v1.2.4",
-        params: "1cbdbee",
-        config: "7940dfd",
-        attempt: 1,
-        has_code: true,
-        has_been_submitted: true,
-        has_output: false,
-        has_logs: true,
-    };
-    const TSV_TEXT = makeStateTsv([SAMPLE_ENTRY]);
     const ARCHIVE_CACHE_KEY = archiveStateCacheKey();
 
     let originalFetch;
@@ -1365,7 +1472,11 @@ describe("fetchArchiveState", () => {
     });
 
     it("resolves against the archive Dandiset's assets.jsonld, not the main queue's", async () => {
-        const { mock } = installStateTsvFetch({ dandisetId: "001873", tsvText: TSV_TEXT });
+        const { mock } = installQueueTablesFetch({
+            dandisetId: "001873",
+            jobsTsv: makeJobsTsv([{ ...SAMPLE_JOB, dandiset_id: "000409", status: "failed" }]),
+            pathsTsv: makePathsTsv(SAMPLE_PATHS),
+        });
 
         const result = await fetchArchiveState();
 
@@ -2031,6 +2142,15 @@ describe("renderFlatList", () => {
         const html = renderFlatList([baseRun]);
         expect(html).toContain("Attempt");
         expect(html).toContain("1");
+    });
+
+    it("shows the job id in place of an attempt number for job capsules", () => {
+        const html = renderFlatList([{ ...baseRun, jobId: "job-26070830b5ff", attempt: null }]);
+        const container = document.createElement("div");
+        container.innerHTML = html;
+
+        expect(container.querySelector(".run-attempt")?.textContent).toBe("Job job-26070830b5ff");
+        expect(html).not.toContain("Attempt&nbsp;null");
     });
 
     it("shows bytes in each flat run entry when available", () => {

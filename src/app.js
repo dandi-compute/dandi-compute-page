@@ -10,22 +10,25 @@ const BRANCH = "draft";
 const DERIVATIVES_DANDISET_ID = "001697";
 const CDN_BASE = `https://raw.githubusercontent.com/${OWNER}/${REPO}/${BRANCH}`;
 
-/* Queue state is published as a plain-text `derivatives/state.tsv` table
-   inside the Dandiset it describes (no separate queue repo/compression
-   anymore). The job-capsules Dandiset (001697, same as CDN_BASE) carries the
-   main queue state; archived failing runs live in the same-shaped table
-   inside a dedicated archive Dandiset, surfaced on the Archive page
-   (?view=archive) to keep them out of the main queue.
+/* Queue state is published as two plain-text tables inside the Dandiset it
+   describes: `derivatives/jobs.tsv` (one row per job capsule) and its sibling
+   `derivatives/paths.tsv` (one row per asset path of a capsule, keyed by
+   job_id, carrying that asset's S3 blob id). Both are written by
+   dandi_compute_code.queue.PipelineQueue. The job-capsules Dandiset (001697,
+   same as CDN_BASE) carries the main queue state; archived failing runs live
+   in the same-shaped tables inside a dedicated archive Dandiset, surfaced on
+   the Archive page (?view=archive) to keep them out of the main queue.
    The 001697/001873 GitHub mirrors are retired for asset content (see the S3
-   blob helpers below), so state.tsv can't be fetched by a predictable raw.
-   githubusercontent.com URL the way it used to be. Unlike a run's output
-   artifacts, it also isn't referenced by any content-id the app already
-   knows -- so its current S3 blob has to be looked up by path against the
-   Dandiset's own `assets.jsonld` manifest (the same one
+   blob helpers below), so the tables can't be fetched by a predictable raw.
+   githubusercontent.com URL. Unlike a run's output artifacts, they also
+   aren't referenced by any content-id the app already knows -- so their
+   current S3 blobs have to be looked up by path against the Dandiset's own
+   `assets.jsonld` manifest (the same one
    dandi_compute_code.dandiset.load_assets_jsonld_metadata reads on the
-   backend) before it can be fetched. See resolveAssetBlobUrl below. */
+   backend) before they can be fetched. See resolveAssetBlobUrls below. */
 const ARCHIVE_DANDISET_ID = "001873";
-const STATE_TSV_RELATIVE_PATH = "derivatives/state.tsv";
+const JOBS_TSV_RELATIVE_PATH = "derivatives/jobs.tsv";
+const PATHS_TSV_RELATIVE_PATH = "derivatives/paths.tsv";
 /* Pipeline scheduling config, packaged with dandi-compute/dandi-compute-core (formerly a
    queue_config.json living only in the now-retired dandi-compute/queue repo). */
 const PIPELINE_CONFIGS_URL =
@@ -318,6 +321,13 @@ function buildInitialRun(run) {
         qcLoaded: false,
         qcQueued: false,
     };
+}
+
+// Job capsules are identified by their job id. Runs from before job ids were
+// introduced carry an attempt number instead.
+function runIdentityLabel(run) {
+    if (run.jobId) return `Job&nbsp;${e(String(run.jobId))}`;
+    return `Attempt&nbsp;${e(String(run.attempt))}`;
 }
 
 function normalizeStatus(status) {
@@ -1021,9 +1031,9 @@ function ensureRegistriesLoaded() {
 // Every draft Dandiset version publishes a bulk `assets.jsonld` manifest
 // (path + contentUrl per asset) directly on the public DANDI S3 bucket -- the
 // same manifest dandi_compute_code.dandiset.load_assets_jsonld_metadata reads
-// on the backend. It's the only way to resolve state.tsv's current S3 blob
-// URL, since (unlike a run's output artifacts) nothing else in the queue data
-// already carries its content-id.
+// on the backend. It's the only way to resolve jobs.tsv's and paths.tsv's
+// current S3 blob URLs, since (unlike a run's output artifacts) nothing else in
+// the queue data already carries their content-ids.
 function assetsJsonldUrl(dandisetId) {
     return `https://dandiarchive.s3.amazonaws.com/dandisets/${dandisetId}/draft/assets.jsonld`;
 }
@@ -1036,15 +1046,8 @@ function archiveStateCacheKey() {
     return ETAG_CACHE_PREFIX + assetsJsonldUrl(ARCHIVE_DANDISET_ID);
 }
 
-// Row fields serialised as compact JSON objects (path/content-id maps) rather
-// than plain scalars — matches QueueState.to_tsv_string's column order/typing
-// on the Python side (dandi_compute_code.queue._queue_state.JobEntry).
-const STATE_TSV_JSON_FIELDS = new Set(["dataset_description_path", "output_paths", "log_paths"]);
-// Row fields written via Python's `str(bool)` ("True"/"False") rather than "true"/"false".
-const STATE_TSV_BOOLEAN_FIELDS = new Set(["has_code", "has_been_submitted", "has_output", "has_logs"]);
-
 // Minimal RFC4180-style tab-delimited parser matching Python's csv module
-// (the writer used to produce state.tsv): fields are unquoted unless they
+// (the writer used to produce jobs.tsv and paths.tsv): fields are unquoted unless they
 // contain the delimiter, a quote, or a newline, in which case they're
 // wrapped in double quotes with embedded quotes doubled.
 function parseTsvRows(text) {
@@ -1090,39 +1093,89 @@ function parseTsvRows(text) {
     return rows;
 }
 
-// Coerce one parsed TSV row (array of raw string cells) into the same shape
-// JSON.parse produced for a state.jsonl line: JSON-decoded path maps, real
-// booleans, numeric attempt/asset_size_bytes, and null for empty cells.
-function coerceStateTsvRow(cols, header) {
-    const raw = {};
-    header.forEach((key, i) => {
-        raw[key] = cols[i] ?? "";
-    });
-    const entry = {};
-    for (const [key, value] of Object.entries(raw)) {
-        if (STATE_TSV_JSON_FIELDS.has(key)) {
-            entry[key] = value ? JSON.parse(value) : {};
-        } else if (STATE_TSV_BOOLEAN_FIELDS.has(key)) {
-            entry[key] = value === "True";
-        } else if (key === "attempt") {
-            entry[key] = value === "" ? null : parseInt(value, 10);
-        } else if (key === "asset_size_bytes") {
-            entry[key] = value === "" ? null : Number(value);
-        } else {
-            entry[key] = value === "" ? null : value;
-        }
-    }
-    return entry;
-}
-
-// Parse a full `state.tsv` table (header + one row per attempt capsule) into
-// the same array-of-entry-dicts shape the app previously got from state.jsonl.
-function parseStateTsv(text) {
+// Parse a tab-separated table (header + rows) into one object per non-empty
+// row, keyed by column name. Every value stays a string; empty cells are "".
+function parseTsvRecords(text) {
     if (!text || !text.trim()) return [];
     const rows = parseTsvRows(text);
     if (!rows.length) return [];
     const [header, ...dataRows] = rows;
-    return dataRows.filter((cols) => cols.some((cell) => cell !== "")).map((cols) => coerceStateTsvRow(cols, header));
+    return dataRows
+        .filter((cols) => cols.some((cell) => cell !== ""))
+        .map((cols) => Object.fromEntries(header.map((key, i) => [key, cols[i] ?? ""])));
+}
+
+// A job capsule's own dataset_description.json sits directly in its capsule
+// directory, which is named after its job id ("…/pipeline-{name}/{job_id}/").
+// Output subtrees can carry dataset_description.json files of their own, so
+// the capsule's is the one whose parent directory is the job id, falling back
+// to the shallowest when none is (a capsule named some other way).
+function capsuleDatasetDescriptionPath(jobId, paths) {
+    const candidates = paths.filter((path) => path.endsWith("/dataset_description.json"));
+    if (candidates.length === 0) return null;
+    const suffix = `/${jobId}/dataset_description.json`;
+    const named = candidates.find((path) => path.endsWith(suffix));
+    if (named) return named;
+    return candidates.reduce((shallowest, path) =>
+        path.split("/").length < shallowest.split("/").length ? path : shallowest
+    );
+}
+
+// Join jobs.tsv rows with their paths.tsv rows into the queue-entry shape
+// parseQueueEntries reads:
+//   - `run_path` is the capsule directory, taken from its dataset_description.json;
+//   - `dataset_description_path` / `output_paths` map each asset path to its blob id;
+//   - the presence flags come from the capsule's `status` (pending → code only,
+//     stalled → submitted, failed → logs without output, successful → output)
+//     plus whether any of its assets sit under `logs/`.
+// The capsule's `status` is folded into those flags rather than passed through,
+// so that the page keeps deriving its own status vocabulary from them.
+function joinJobsAndPaths(jobRows, pathRows) {
+    const pathsByJob = new Map();
+    for (const row of pathRows) {
+        if (!row.job_id || !row.path) continue;
+        if (!pathsByJob.has(row.job_id)) pathsByJob.set(row.job_id, new Map());
+        pathsByJob.get(row.job_id).set(row.path, row.content_id);
+    }
+    return jobRows.map((row) => {
+        const blobIdsByPath = pathsByJob.get(row.job_id) ?? new Map();
+        const datasetDescriptionPath = capsuleDatasetDescriptionPath(row.job_id, [...blobIdsByPath.keys()]);
+        const runPath = datasetDescriptionPath
+            ? datasetDescriptionPath.slice(0, -"/dataset_description.json".length)
+            : null;
+        const outputPaths = {};
+        for (const [path, blobId] of blobIdsByPath) {
+            if (path !== datasetDescriptionPath) outputPaths[path] = blobId;
+        }
+        const hasLogPath =
+            runPath !== null && Object.keys(outputPaths).some((path) => path.startsWith(`${runPath}/logs/`));
+        const status = row.status || null;
+        return {
+            job_id: row.job_id || null,
+            dandiset_id: row.dandiset_id || null,
+            dandi_path: row.within_dandiset_path || null,
+            pipeline: row.pipeline || null,
+            version: row.version || null,
+            params: row.params || null,
+            config: row.config || null,
+            codebase: row.codebase || null,
+            content_id: row.content_id || null,
+            asset_size_bytes:
+                row.asset_size_bytes === "" || row.asset_size_bytes == null ? null : Number(row.asset_size_bytes),
+            created_at: row.created_at || null,
+            job_submission_time: row.job_submission_time || null,
+            job_completion_time: row.job_completion_time || null,
+            run_path: runPath,
+            has_code: true,
+            has_been_submitted: status !== "pending",
+            has_output: status === "successful",
+            has_logs: status === "failed" || hasLogPath,
+            dataset_description_path: datasetDescriptionPath
+                ? { [datasetDescriptionPath]: blobIdsByPath.get(datasetDescriptionPath) }
+                : {},
+            output_paths: outputPaths,
+        };
+    });
 }
 
 // Shared error mapping for both the assets.jsonld lookup and the resolved
@@ -1142,11 +1195,12 @@ async function fetchDandiText(url, context) {
     throw new Error(`Failed to load ${context} (HTTP ${resp.status}).`);
 }
 
-// Look up *path*'s current S3 blob URL within *dandisetId*'s draft
-// assets.jsonld manifest. Content-addressed, so once resolved the blob itself
-// is fetched via cachedFetch's immutable-blob path (see isImmutableBlobUrl) --
-// only this manifest lookup needs revalidating each session.
-async function resolveAssetBlobUrl(dandisetId, path) {
+// Look up the current S3 blob URL of each of *paths* within *dandisetId*'s
+// draft assets.jsonld manifest, in the order given. Content-addressed, so once
+// resolved the blobs themselves are fetched via cachedFetch's immutable-blob
+// path (see isImmutableBlobUrl) -- only this manifest lookup needs
+// revalidating each session.
+async function resolveAssetBlobUrls(dandisetId, paths) {
     const text = await fetchDandiText(assetsJsonldUrl(dandisetId), `asset metadata for Dandiset ${dandisetId}`);
     let assets;
     try {
@@ -1154,33 +1208,44 @@ async function resolveAssetBlobUrl(dandisetId, path) {
     } catch {
         throw new Error(`Asset metadata for Dandiset ${dandisetId} is not valid JSON.`);
     }
-    const asset = Array.isArray(assets) ? assets.find((a) => a && a.path === path) : null;
-    const contentUrls = Array.isArray(asset?.contentUrl) ? asset.contentUrl : [];
-    const blobUrl = contentUrls.find((u) => typeof u === "string" && u.includes("/blobs/"));
-    if (!blobUrl) {
-        throw new Error(`${path} not found in Dandiset ${dandisetId}'s asset listing.`);
-    }
-    return blobUrl;
+    const assetsByPath = new Map((Array.isArray(assets) ? assets : []).filter((a) => a?.path).map((a) => [a.path, a]));
+    return paths.map((path) => {
+        const contentUrls = assetsByPath.get(path)?.contentUrl;
+        const blobUrl = (Array.isArray(contentUrls) ? contentUrls : []).find(
+            (u) => typeof u === "string" && u.includes("/blobs/")
+        );
+        if (!blobUrl) {
+            throw new Error(`${path} not found in Dandiset ${dandisetId}'s asset listing.`);
+        }
+        return blobUrl;
+    });
 }
 
-// Fetch and parse a Dandiset's `derivatives/state.tsv` queue state table.
-// Defaults to the main queue state; pass { dandisetId } to fetch a different
-// source (e.g. the archive Dandiset's state.tsv).
+// Fetch a Dandiset's `derivatives/jobs.tsv` and `derivatives/paths.tsv` and
+// join them into queue entries (see joinJobsAndPaths). Defaults to the main
+// queue state; pass { dandisetId } to fetch a different source (e.g. the
+// archive Dandiset's tables).
 async function fetchQueueState(options = {}) {
     const { dandisetId = DERIVATIVES_DANDISET_ID } = options;
-    const blobUrl = await resolveAssetBlobUrl(dandisetId, STATE_TSV_RELATIVE_PATH);
-    const text = await fetchDandiText(blobUrl, "queue state");
-    return parseStateTsv(text);
+    const [jobsBlobUrl, pathsBlobUrl] = await resolveAssetBlobUrls(dandisetId, [
+        JOBS_TSV_RELATIVE_PATH,
+        PATHS_TSV_RELATIVE_PATH,
+    ]);
+    const [jobsText, pathsText] = await Promise.all([
+        fetchDandiText(jobsBlobUrl, "the jobs table"),
+        fetchDandiText(pathsBlobUrl, "the paths table"),
+    ]);
+    return joinJobsAndPaths(parseTsvRecords(jobsText), parseTsvRecords(pathsText));
 }
 
-// Fetch the archived failing runs from the archive Dandiset's state.tsv
-// (shares the same table schema as the main queue state.tsv).
+// Fetch the archived failing runs from the archive Dandiset's jobs.tsv and
+// paths.tsv (the same schema as the main queue's).
 async function fetchArchiveState() {
     return fetchQueueState({ dandisetId: ARCHIVE_DANDISET_ID });
 }
 
-// Only the assets.jsonld manifest lookups are cleared: the resolved state.tsv
-// blob itself is content-addressed (immutable), and per-run S3 blobs already
+// Only the assets.jsonld manifest lookups are cleared: the resolved jobs.tsv
+// and paths.tsv blobs are content-addressed (immutable), and per-run S3 blobs already
 // always arrive as new blob URLs in a freshly resolved state.
 function clearQueueStateCache() {
     try {
@@ -1420,7 +1485,8 @@ function parseQueueEntries(entries) {
         const parsed = parseDandiPath(entry.dandi_path);
         const createdAt = entry.created_at ?? null;
         return {
-            path: buildRunPath(entry),
+            path: entry.run_path ?? buildRunPath(entry),
+            jobId: entry.job_id ?? null,
             dandisetId: entry.dandiset_id,
             dandiPath: entry.dandi_path ?? null,
             subject: resolveSubject(entry.dandiset_id, entry.subject ?? parsed.subject),
@@ -2127,7 +2193,7 @@ function renderRunEntry(run) {
         ${run.paramsProfile ? `<span class="run-sep">·</span><span class="run-params">${renderRegistryLink("Params", run.paramsProfile, PARAMS_REGISTRY, "params")}</span>` : ""}
         ${run.configHash ? `<span class="run-sep">·</span><span class="run-config">${renderRegistryLink("Config", run.configHash, CONFIG_REGISTRY, "configs")}</span>` : ""}
         ${bytesHtml}
-        <span class="run-attempt">Attempt&nbsp;${e(String(run.attempt))}</span>
+        <span class="run-attempt">${runIdentityLabel(run)}</span>
         <a class="run-entry-derivatives-link" href="${e(derivativesUrl(run.path))}" target="_blank" rel="noopener">↗ Derivatives${DANDI_ICON_HTML}</a>
     </div>
 
@@ -3724,7 +3790,7 @@ function renderFlatRunEntry(run) {
             ${run.configHash ? `<span class="run-sep">·</span><span class="flat-ctx-text">${renderRegistryLink("Config", run.configHash, CONFIG_REGISTRY, "configs")}</span>` : ""}
         </span>
         ${bytesHtml}
-        <span class="run-attempt">Attempt&nbsp;${e(String(run.attempt))}</span>
+        <span class="run-attempt">${runIdentityLabel(run)}</span>
         <a class="run-entry-derivatives-link" href="${e(derivativesUrl(run.path))}" target="_blank" rel="noopener">↗ Derivatives${DANDI_ICON_HTML}</a>
     </div>
 
@@ -5605,7 +5671,7 @@ async function init() {
     if (_viewMode === "archive") {
         setPageCopy(
             "Archived Pipeline Runs",
-            `Failing runs that have been archived from the main queue, sourced from <a href="${dandiBaseUrl(ARCHIVE_DANDISET_ID)}/dandiset/${ARCHIVE_DANDISET_ID}/draft/files?location=${encodeURIComponent(STATE_TSV_RELATIVE_PATH)}" target="_blank" rel="noopener">Dandiset ${ARCHIVE_DANDISET_ID}'s state.tsv</a>.`
+            `Failing runs that have been archived from the main queue, sourced from <a href="${dandiBaseUrl(ARCHIVE_DANDISET_ID)}/dandiset/${ARCHIVE_DANDISET_ID}/draft/files?location=derivatives" target="_blank" rel="noopener">Dandiset ${ARCHIVE_DANDISET_ID}'s jobs.tsv</a>.`
         );
     }
 
