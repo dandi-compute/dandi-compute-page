@@ -906,6 +906,181 @@ details[open] > .run-section-title::before {
     text-decoration: none;
 }
 
+/* ─── Curation (SpikeInterface GUI) ─────────────────────────── */
+.code-block {
+    position: relative;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+
+.code-block-pre {
+    margin: 0;
+    padding: 12px 14px;
+    max-height: 420px;
+    overflow: auto;
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.8em;
+    line-height: 1.5;
+    color: var(--color-text);
+    white-space: pre;
+}
+
+.copy-code-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 28px;
+    color: var(--color-accent);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 0;
+    cursor: pointer;
+    transition:
+        border-color 0.15s,
+        background 0.15s,
+        color 0.15s;
+}
+
+.copy-code-btn:hover {
+    border-color: var(--color-accent);
+    background: var(--color-accent-subtle);
+}
+
+.copy-code-btn[data-state="copied"] {
+    color: var(--color-success);
+    border-color: var(--color-success);
+}
+
+.copy-code-btn[data-state="failed"] {
+    color: var(--color-failed);
+    border-color: var(--color-failed);
+}
+
+/* ─── Curation page ─────────────────────────────────────────── */
+.curation-page {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 1100px;
+    margin: 0 auto 40px;
+}
+
+.curation-script {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    overflow: hidden;
+}
+
+.curation-section-heading {
+    margin: 12px 0 0;
+    font-size: 1.1em;
+    font-weight: 600;
+    color: var(--color-text);
+}
+
+.curation-script .code-block {
+    border: none;
+    border-radius: 0;
+}
+
+.curation-script .code-block-pre {
+    max-height: none;
+}
+
+.curation-filled,
+.curation-notice,
+.curation-tip {
+    margin: 0;
+    font-size: 0.9em;
+    line-height: 1.5;
+    color: var(--color-text-secondary);
+}
+
+.curation-filled {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-left: 3px solid var(--color-accent);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    color: var(--color-text);
+}
+
+.curation-filled-asset {
+    word-break: break-word;
+}
+
+.curation-notice {
+    background: var(--color-stalled-bg);
+    border: 1px solid var(--color-stalled);
+    border-radius: var(--radius);
+    padding: 10px 14px;
+    color: var(--color-text);
+}
+
+.curation-page a {
+    color: var(--color-accent);
+    text-decoration: none;
+}
+
+.curation-page a:hover {
+    text-decoration: underline;
+}
+
+.curation-page code {
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.88em;
+}
+
+.curation-setup-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+}
+
+.curation-setup-title::-webkit-details-marker {
+    display: none;
+}
+
+.curation-setup-title::before {
+    content: "›";
+    display: inline-block;
+    width: 12px;
+    text-align: center;
+    font-size: 1.2em;
+    transition: transform 0.2s;
+}
+
+.curation-setup[open] > .curation-setup-title::before {
+    transform: rotate(90deg);
+}
+
+.curation-setup:not([open]) > .curation-setup-title {
+    margin-bottom: 0;
+}
+
+.code-placeholder {
+    background: var(--color-stalled-bg);
+    color: var(--color-stalled);
+    border: 1px dashed var(--color-stalled);
+    border-radius: 3px;
+    padding: 0 2px;
+    font-weight: 700;
+}
+
 /* ─── Log file modal ────────────────────────────────────────── */
 .log-modal-overlay {
     position: fixed;
@@ -1402,6 +1577,15 @@ details[open] > .params-summary::before {
     border-radius: 10px;
     white-space: nowrap;
 }
+.gbadge-curatable {
+    background: var(--color-accent-subtle);
+    color: var(--color-accent);
+}
+.gbadge-curatable-none {
+    background: transparent;
+    border: 1px dashed var(--color-border);
+    color: var(--color-text-secondary);
+}
 .gbadge-success {
     background: var(--color-success-bg);
     color: var(--color-success);
@@ -1506,6 +1690,34 @@ details[open] > .params-summary::before {
     margin-left: 0.3em;
 }
 .run-entry-derivatives-link:hover {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+    background: var(--color-accent-subtle);
+    text-decoration: none;
+}
+
+.run-entry-curate-link {
+    font-size: 0.78em;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--color-text-secondary);
+    text-decoration: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 2px 8px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition:
+        color 0.15s,
+        border-color 0.15s,
+        background 0.15s;
+}
+.run-entry-curate-missing {
+    opacity: 0.6;
+    border-style: dashed;
+    cursor: help;
+}
+a.run-entry-curate-link:hover {
     color: var(--color-accent);
     border-color: var(--color-accent);
     background: var(--color-accent-subtle);

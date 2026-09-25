@@ -20,6 +20,16 @@ const {
     fetchSlurmLogs,
     fetchVisualizationData,
     initModal,
+    initCopyCodeButtons,
+    curationScript,
+    curationScriptValues,
+    curationExportScript,
+    findCurationRun,
+    initCurationPage,
+    renderCurationLink,
+    renderGroupBadges,
+    renderCurationPage,
+    runPostprocessedAnalyzers,
     initLayoutToggle,
     loadAindPipelineRegistries,
     normalizeConfigHash,
@@ -177,6 +187,8 @@ describe("app unit behavior", () => {
         expect(parseViewMode()).toBe("dashboard");
         window.history.replaceState(null, "", "/?view=archive");
         expect(parseViewMode()).toBe("archive");
+        window.history.replaceState(null, "", "/?view=curation");
+        expect(parseViewMode()).toBe("curation");
         window.history.replaceState(null, "", "/?view=bogus");
         expect(parseViewMode()).toBe(null);
         window.history.replaceState(null, "", "/");
@@ -296,6 +308,7 @@ describe("app unit behavior", () => {
         expect(html).toContain('href="?view=dashboard"');
         expect(html).toContain("qualifying-aind-content-ids");
         expect(html).toContain("Explore &amp; resources");
+        expect(html).toContain('href="?view=curation"');
     });
 
     it("includes all test-only dandisets used to scope dashboard and tests views", () => {
@@ -1583,6 +1596,401 @@ describe("pipeline registries", () => {
         expect(registries.configRegistry).toEqual(expect.arrayContaining([expect.objectContaining({ alias: "v1" })]));
         expect(warnSpy).toHaveBeenCalled();
         warnSpy.mockRestore();
+    });
+});
+
+describe("curation page", () => {
+    const RUN_PATH =
+        "derivatives/dandisets-000/dandiset-000397/sub-Pt01/sub-Pt01_ecephys/pipeline-aind+ephys/job-26070830b5ff";
+    const makeRun = (overrides = {}) => ({
+        status: "success",
+        attempt: 1,
+        tasks: [],
+        generatedBy: [],
+        vizData: null,
+        logFiles: [],
+        path: RUN_PATH,
+        jobId: "job-26070830b5ff",
+        dandiPath: "sub-Pt01/sub-Pt01_ecephys.nwb",
+        dandisetId: "000397",
+        subject: "Pt01",
+        session: null,
+        pipelineName: "aind+ephys",
+        pipelineVersion: "v1.2.4",
+        paramsProfile: "1cbdbee",
+        configHash: "7940dfd",
+        outputPaths: {
+            [`${RUN_PATH}/derivatives/postprocessed/block0_acquisition-ElectricalSeriesProbe01AP_recording1.zarr`]:
+                "22222222-2222-2222-2222-222222222222",
+            [`${RUN_PATH}/derivatives/postprocessed/block0_acquisition-ElectricalSeriesProbe00AP_recording1.zarr`]:
+                "11111111-1111-1111-1111-111111111111",
+            [`${RUN_PATH}/derivatives/visualization/drift_map.png`]: "77fdae74-59bc-44d3-ba30-5cd70322fd65",
+            [`${RUN_PATH}/logs/trace.txt`]: "5be809fd-5534-451c-bca2-d738df07b8ea",
+        },
+        ...overrides,
+    });
+
+    it("lists the run's postprocessed Zarr analyzers with their S3 locations, sorted by recording", () => {
+        expect(runPostprocessedAnalyzers(makeRun())).toEqual([
+            {
+                name: "block0_acquisition-ElectricalSeriesProbe00AP_recording1",
+                zarrId: "11111111-1111-1111-1111-111111111111",
+                url: "s3://dandiarchive/zarr/11111111-1111-1111-1111-111111111111/",
+            },
+            {
+                name: "block0_acquisition-ElectricalSeriesProbe01AP_recording1",
+                zarrId: "22222222-2222-2222-2222-222222222222",
+                url: "s3://dandiarchive/zarr/22222222-2222-2222-2222-222222222222/",
+            },
+        ]);
+    });
+
+    it("ignores files outside postprocessed/ and nested or non-Zarr entries", () => {
+        const run = makeRun({
+            outputPaths: {
+                [`${RUN_PATH}/derivatives/postprocessed/rec.zarr/zarr.json`]: "aaaaaaaa",
+                [`${RUN_PATH}/derivatives/postprocessed/notes.json`]: "bbbbbbbb",
+                [`${RUN_PATH}/derivatives/curated/rec.zarr`]: "cccccccc",
+            },
+        });
+        expect(runPostprocessedAnalyzers(run)).toEqual([]);
+        expect(runPostprocessedAnalyzers({ path: RUN_PATH })).toEqual([]);
+    });
+
+    it("fills the script with the job's Zarr IDs, capsule path, and a per-job curation file", () => {
+        const script = curationScript(curationScriptValues(makeRun()));
+        expect(script).toContain("# Curate job-26070830b5ff with SpikeInterface GUI");
+        expect(script).toContain(`# Job capsule: ${RUN_PATH}`);
+        expect(script).toContain(
+            '    "block0_acquisition-ElectricalSeriesProbe00AP_recording1": "s3://dandiarchive/zarr/11111111-1111-1111-1111-111111111111/",'
+        );
+        expect(script).toContain(
+            '    "block0_acquisition-ElectricalSeriesProbe01AP_recording1": "s3://dandiarchive/zarr/22222222-2222-2222-2222-222222222222/",'
+        );
+        expect(script).toContain("# This job has 2 recordings; pick the one to curate.");
+        expect(script).toContain('RECORDING = "block0_acquisition-ElectricalSeriesProbe00AP_recording1"');
+        expect(script).toContain('CURATION_FILE = Path(f"job-26070830b5ff_{RECORDING}_curation.json")');
+        expect(script).toContain("load_sorting_analyzer(ANALYZERS[RECORDING], load_extensions=False)");
+        expect(script).toContain("curation_callback=save_curation");
+    });
+
+    it("omits the recording hint for single-recording jobs and falls back to the capsule name for the job", () => {
+        const run = makeRun({
+            jobId: null,
+            outputPaths: {
+                [`${RUN_PATH}/derivatives/postprocessed/rec1.zarr`]: "0aca22c2-1af0-496e-a1da-7e34ecd07c18",
+            },
+        });
+        const script = curationScript(curationScriptValues(run));
+        expect(script).not.toContain("pick the one to curate");
+        expect(script).toContain('RECORDING = "rec1"');
+        expect(script).toContain("# Curate job-26070830b5ff with SpikeInterface GUI");
+    });
+
+    it("uses placeholders for every job-specific value when no job is given", () => {
+        const script = curationScript(curationScriptValues());
+        expect(script).toContain("# Curate <JOB_ID> with SpikeInterface GUI");
+        expect(script).toContain("# Job capsule: <JOB_CAPSULE_PATH>");
+        expect(script).toContain('    "<RECORDING_NAME>": "s3://dandiarchive/zarr/<ZARR_ID>/",');
+        expect(script).toContain('RECORDING = "<RECORDING_NAME>"');
+        expect(script).toContain('CURATION_FILE = Path(f"<JOB_ID>_{RECORDING}_curation.json")');
+    });
+
+    it("fills the export script with the job's analyzers, source asset, and capsule output folder", () => {
+        const run = makeRun({ contentHash: "a05ac4e6-030f-49b7-ac62-e1aa74e54dcb" });
+        const script = curationExportScript(curationScriptValues(run));
+        expect(script).toContain("# Export the curated sorting of job-26070830b5ff to NWB");
+        expect(script).toContain('RECORDING = "block0_acquisition-ElectricalSeriesProbe00AP_recording1"');
+        expect(script).toContain('CURATION_FILE = Path(f"job-26070830b5ff_{RECORDING}_curation.json")');
+        expect(script).toContain('SOURCE_ASSET = "DANDI:000397/sub-Pt01/sub-Pt01_ecephys.nwb"');
+        expect(script).toContain(
+            'SOURCE_NWB_URL = "https://dandiarchive.s3.amazonaws.com/blobs/a05/ac4/a05ac4e6-030f-49b7-ac62-e1aa74e54dcb"'
+        );
+        expect(script).toContain('OUTPUT_DIR = Path("curated")');
+        expect(script).toContain('nwb_path = OUTPUT_DIR / f"job-26070830b5ff_{RECORDING}_curated.nwb"');
+        expect(script).not.toContain("001697");
+        expect(script).toContain("apply_curation(analyzer, curation, sparsity_overlap=SPARSITY_OVERLAP)");
+        expect(script).toContain('curated.compute("template_metrics")');
+        expect(script).toContain("nwbfile.units.resolution = 1 / curated.sampling_frequency");
+    });
+
+    it("uses placeholders in the export script when no job is given", () => {
+        const script = curationExportScript(curationScriptValues());
+        expect(script).toContain('SOURCE_ASSET = "<SOURCE_ASSET>"');
+        expect(script).toContain('SOURCE_NWB_URL = "<SOURCE_NWB_URL>"');
+        expect(script).toContain('nwb_path = OUTPUT_DIR / f"<JOB_ID>_{RECORDING}_curated.nwb"');
+        expect(script).toContain('    "<RECORDING_NAME>": "s3://dandiarchive/zarr/<ZARR_ID>/",');
+    });
+
+    it("falls back to source placeholders for a job without a source path or content id", () => {
+        const values = curationScriptValues(makeRun({ dandiPath: null, contentHash: null }));
+        expect(values.sourceAsset).toBe("<SOURCE_ASSET>");
+        expect(values.sourceNwbUrl).toBe("<SOURCE_NWB_URL>");
+    });
+
+    it("links successful run cards to the filled-in curation page in a new tab", () => {
+        const link = renderCurationLink(makeRun());
+        expect(link).toContain('href="?view=curation&amp;job=job-26070830b5ff"');
+        expect(link).toContain('target="_blank"');
+        expect(renderCurationLink(makeRun({ jobId: null }))).toContain(
+            `href="?view=curation&amp;job=${encodeURIComponent(RUN_PATH)}"`
+        );
+        expect(renderCurationLink(makeRun({ status: "failed" }))).toBe("");
+        expect(renderCurationLink(makeRun({ outputPaths: {} }))).toContain("✎ Not curatable");
+        expect(renderCurationLink(makeRun({ outputPaths: {} }))).not.toContain("href=");
+        expect(renderFlatList([makeRun()])).toContain("run-entry-curate-link");
+        expect(renderDandisets([makeRun()])).toContain("run-entry-curate-link");
+        expect(renderFlatList([makeRun({ status: "failed" })])).not.toContain("run-entry-curate-link");
+    });
+
+    it("counts curatable successful runs in group badges", () => {
+        const html = renderGroupBadges([
+            makeRun(),
+            makeRun({ jobId: "job-b", outputPaths: {} }),
+            makeRun({ jobId: "job-c", status: "failed" }),
+        ]);
+        expect(html).toContain('class="gbadge gbadge-curatable"');
+        expect(html).toContain("1/2&thinsp;✎");
+        expect(html).toContain('title="1 of 2 successful runs has postprocessed output to curate"');
+
+        const none = renderGroupBadges([makeRun({ outputPaths: {} })]);
+        expect(none).toContain("gbadge-curatable-none");
+        expect(none).toContain("0/1&thinsp;✎");
+        expect(renderGroupBadges([makeRun({ status: "failed" })])).not.toContain("gbadge-curatable");
+        expect(renderDandisets([makeRun()])).toContain("gbadge-curatable");
+    });
+
+    it("finds a job by its ID or capsule path", () => {
+        const run = makeRun();
+        const runs = [makeRun({ jobId: "job-other", path: "derivatives/elsewhere/job-other" }), run];
+        expect(findCurationRun(runs, "job-26070830b5ff")).toBe(run);
+        expect(findCurationRun(runs, RUN_PATH)).toBe(run);
+        expect(findCurationRun(runs, "job-missing")).toBeNull();
+        expect(findCurationRun(runs, null)).toBeNull();
+    });
+
+    it("renders the template page with highlighted placeholders, no job picker, and a collapsible setup card", () => {
+        const html = renderCurationPage();
+        expect(html).not.toContain("<input");
+        expect(html).not.toContain("<select");
+        expect(html).toContain('<mark class="code-placeholder">&lt;ZARR_ID&gt;</mark>');
+        expect(html).toContain('<mark class="code-placeholder">&lt;JOB_ID&gt;</mark>');
+        expect(html).toContain("Curation script template");
+        expect(html).toContain("✎ Curate");
+        expect(html).toMatch(
+            /<details class="params-instructions curation-setup" open>\s*<summary[^>]*>How to curate a run/
+        );
+        expect(html).toContain("pip install &quot;spikeinterface-gui[desktop]&quot; s3fs");
+        expect(html.indexOf("curation-setup")).toBeLessThan(html.indexOf("curation-tip"));
+        expect(html.indexOf("curation-setup")).toBeLessThan(html.indexOf("curation-script"));
+    });
+
+    it("starts the setup card collapsed when the viewer collapsed it before", () => {
+        localStorage.setItem("curationSetupOpen", "0");
+        expect(renderCurationPage()).toMatch(/<details class="params-instructions curation-setup">/);
+    });
+
+    it("escapes the requested job in the fallback notice", () => {
+        const html = renderCurationPage(null, {
+            jobKey: '<img src=x onerror="alert(1)">',
+            reason: "bogus",
+            detail: "<b>",
+        });
+        expect(html).not.toContain("<img");
+        expect(html).not.toContain("<b>");
+        expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+        expect(html).toContain("could not be loaded (&lt;b&gt;)");
+    });
+
+    it("renders the export script below the curation script and links DANDI's upload instructions", () => {
+        const html = renderCurationPage(makeRun());
+        expect(html).toContain("Export the curation to NWB");
+        expect(html.indexOf("Curation script")).toBeLessThan(html.indexOf("Export script"));
+        expect(html).toContain("pip install neuroconv remfile");
+        expect(html).toContain("upload the curated file to any Dandiset they own");
+        expect(html).toContain('href="https://docs.dandiarchive.org/user-guide-sharing/uploading-data/"');
+        expect(html).toContain('href="https://www.youtube.com/watch?v=OGlQtxzip-Q&amp;t=3s"');
+        expect(html).not.toContain("Upload commands");
+        expect(html).not.toContain("dandi organize");
+        expect(renderCurationPage()).toContain('<mark class="code-placeholder">&lt;SOURCE_NWB_URL&gt;</mark>');
+    });
+
+    it("highlights a source placeholder a filled-in job falls back to", () => {
+        const html = renderCurationPage(makeRun({ contentHash: null }));
+        expect(html).toContain('<mark class="code-placeholder">&lt;SOURCE_NWB_URL&gt;</mark>');
+        expect(html).not.toContain("&lt;ZARR_ID&gt;");
+    });
+
+    it("renders the filled-in page for a job without job placeholders", () => {
+        const html = renderCurationPage(makeRun({ contentHash: "a05ac4e6-030f-49b7-ac62-e1aa74e54dcb" }));
+        expect(html).toContain("Filled in for <code>job-26070830b5ff</code>");
+        expect(html).toContain("Dandiset 000397");
+        for (const token of [
+            "JOB_ID",
+            "JOB_CAPSULE_PATH",
+            "RECORDING_NAME",
+            "ZARR_ID",
+            "SOURCE_ASSET",
+            "SOURCE_NWB_URL",
+        ]) {
+            expect(html).not.toContain(`&lt;${token}&gt;`);
+        }
+        expect(html).not.toContain("&lt;ZARR_ID&gt;");
+        expect(html).toContain("s3://dandiarchive/zarr/11111111-1111-1111-1111-111111111111/");
+    });
+
+    describe("initCurationPage", () => {
+        const PAGE_IDS = ["loading", "error", "filter-banner", "summary", "layout-bar", "runs"];
+        let originalFetch;
+
+        let stubCount = 0;
+
+        // Fresh blob URLs per stub: blob URLs are content-addressed, so a reused
+        // one would be served from the page's immutable blob cache.
+        function stubQueue(run) {
+            stubCount += 1;
+            const jobsUrl = `https://dandiarchive.s3.amazonaws.com/blobs/aaa/aaa/aaaaaa-curation-jobs-${stubCount}`;
+            const pathsUrl = `https://dandiarchive.s3.amazonaws.com/blobs/bbb/bbb/bbbbbb-curation-paths-${stubCount}`;
+            const pathRows = [
+                {
+                    job_id: run.jobId,
+                    path: `${RUN_PATH}/dataset_description.json`,
+                    content_id: "d6f79e26-19c9-4cf5-befc-dceb46a9394f",
+                },
+                ...Object.entries(run.outputPaths).map(([path, id]) => ({ job_id: run.jobId, path, content_id: id })),
+            ];
+            global.fetch = vi.fn(async (url) => {
+                const href = String(url);
+                if (href.endsWith("/001697/draft/assets.jsonld")) {
+                    return new Response(
+                        JSON.stringify([
+                            { path: "derivatives/jobs.tsv", contentUrl: [jobsUrl] },
+                            { path: "derivatives/paths.tsv", contentUrl: [pathsUrl] },
+                        ]),
+                        { status: 200 }
+                    );
+                }
+                if (href === jobsUrl) {
+                    return new Response(
+                        makeJobsTsv([
+                            {
+                                job_id: run.jobId,
+                                dandiset_id: "000397",
+                                within_dandiset_path: "sub-Pt01/sub-Pt01_ecephys.nwb",
+                                pipeline: "aind+ephys",
+                                version: "v1.2.4",
+                                params: "1cbdbee",
+                                config: "7940dfd",
+                                status: "successful",
+                            },
+                        ]),
+                        { status: 200 }
+                    );
+                }
+                if (href === pathsUrl) return new Response(makePathsTsv(pathRows), { status: 200 });
+                return new Response("", { status: 404 });
+            });
+        }
+
+        async function openPage(search) {
+            window.history.replaceState(null, "", `/?view=curation${search}`);
+            document.body.innerHTML = PAGE_IDS.map((id) => `<div id="${id}"></div>`).join("");
+            await initCurationPage();
+            return {
+                code: document.querySelector(".curation-script code").textContent,
+                notice: document.querySelector(".curation-notice")?.textContent ?? null,
+            };
+        }
+
+        beforeEach(() => {
+            originalFetch = global.fetch;
+            clearQueueStateCache();
+        });
+
+        afterEach(() => {
+            global.fetch = originalFetch;
+            clearQueueStateCache();
+        });
+
+        it("fills the script in for ?job=", async () => {
+            stubQueue(makeRun());
+            const { code, notice } = await openPage("&job=job-26070830b5ff");
+            expect(notice).toBeNull();
+            expect(document.querySelector(".curation-filled").textContent).toContain("job-26070830b5ff");
+            expect(code).toContain('"s3://dandiarchive/zarr/11111111-1111-1111-1111-111111111111/"');
+            expect(code).not.toContain("<ZARR_ID>");
+        });
+
+        it("shows placeholders without fetching when no job is given", async () => {
+            global.fetch = vi.fn();
+            const { code, notice } = await openPage("");
+            expect(global.fetch).not.toHaveBeenCalled();
+            expect(notice).toBeNull();
+            expect(code).toContain("<ZARR_ID>");
+        });
+
+        it("falls back to placeholders with a notice for unknown or uncuratable jobs", async () => {
+            stubQueue(makeRun());
+            let page = await openPage("&job=job-missing");
+            expect(page.notice).toContain("job-missing was not found");
+            expect(page.code).toContain("<ZARR_ID>");
+
+            clearQueueStateCache();
+            stubQueue(makeRun({ outputPaths: { [`${RUN_PATH}/logs/trace.txt`]: "5be809fd" } }));
+            page = await openPage("&job=job-26070830b5ff");
+            expect(page.notice).toContain("has no derivatives/postprocessed/ output");
+            expect(page.code).toContain("<ZARR_ID>");
+        });
+
+        it("falls back to placeholders with a notice when the queue can't be loaded", async () => {
+            global.fetch = vi.fn(async () => new Response("", { status: 500 }));
+            const { code, notice } = await openPage("&job=job-26070830b5ff");
+            expect(notice).toContain("Job job-26070830b5ff could not be loaded (Failed to load");
+            expect(code).toContain("<ZARR_ID>");
+        });
+
+        it("remembers when the setup card is collapsed", async () => {
+            global.fetch = vi.fn();
+            await openPage("");
+            const setup = document.querySelector(".curation-setup");
+            setup.open = false;
+            setup.dispatchEvent(new Event("toggle"));
+            expect(localStorage.getItem("curationSetupOpen")).toBe("0");
+        });
+    });
+
+    it("copies the code block's plain script to the clipboard and swaps the icon", async () => {
+        vi.useFakeTimers();
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        const originalClipboard = navigator.clipboard;
+        Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+        const controller = new AbortController();
+        const originalAdd = document.addEventListener.bind(document);
+        const addSpy = vi
+            .spyOn(document, "addEventListener")
+            .mockImplementation((type, fn, opts) => originalAdd(type, fn, { ...opts, signal: controller.signal }));
+        try {
+            initCopyCodeButtons();
+            document.body.innerHTML = `<div id="runs">${renderCurationPage()}</div>`;
+            const btn = document.querySelector(".copy-code-btn");
+            expect(btn.textContent.trim()).toBe("");
+            expect(btn.querySelector("svg")).not.toBeNull();
+            btn.click();
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(writeText).toHaveBeenCalledTimes(1);
+            expect(writeText.mock.calls[0][0]).toBe(curationScript(curationScriptValues()));
+            expect(btn.dataset.state).toBe("copied");
+            expect(btn.title).toBe("Copied!");
+            vi.advanceTimersByTime(1500);
+            expect(btn.dataset.state).toBeUndefined();
+            expect(btn.title).toBe("Copy");
+        } finally {
+            vi.useRealTimers();
+            addSpy.mockRestore();
+            controller.abort();
+            Object.defineProperty(navigator, "clipboard", { value: originalClipboard, configurable: true });
+        }
     });
 });
 
