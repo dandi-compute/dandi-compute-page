@@ -1745,9 +1745,10 @@ describe("curation page", () => {
         expect(html).toContain("Curation script template");
         expect(html).toContain("✎ Curate");
         expect(html).toMatch(
-            /<details class="params-instructions curation-setup" open>\s*<summary[^>]*>Setup instructions/
+            /<details class="params-instructions curation-setup" open>\s*<summary[^>]*>How to curate a run/
         );
         expect(html).toContain("pip install &quot;spikeinterface-gui[desktop]&quot; s3fs");
+        expect(html.indexOf("curation-setup")).toBeLessThan(html.indexOf("curation-tip"));
         expect(html.indexOf("curation-setup")).toBeLessThan(html.indexOf("curation-script"));
     });
 
