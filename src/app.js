@@ -2984,15 +2984,8 @@ function renderCurationPage(run = null, fallback = null) {
     const offset = run ? 1 : 2;
 
     return `<div class="curation-page">
-    ${noticeHtml}
-    ${filledHtml}
-    ${
-        run
-            ? ""
-            : `<p class="curation-tip">Tip: click <strong>✎ Curate</strong> on a successful run in the <a href="?view=dashboard">dashboard</a> to open this script with every value filled in for that job.</p>`
-    }
     <details class="params-instructions curation-setup"${curationSetupOpen() ? " open" : ""}>
-        <summary class="params-instructions-title curation-setup-title">Setup instructions</summary>
+        <summary class="params-instructions-title curation-setup-title">How to curate a run</summary>
         ${findSteps}
         <div class="params-instructions-step">
             <span class="params-instructions-num">${offset + 1}</span>
@@ -3007,6 +3000,13 @@ function renderCurationPage(run = null, fallback = null) {
             <span>Label, merge, split or remove units in the curation panel, then click <strong>Save curation</strong>. The archive copy is read-only, so the curation is saved to a local JSON file in the SpikeInterface curation format; re-running the script resumes from it. The traces view is disabled because the postprocessed output does not include the recording.</span>
         </div>
     </details>
+    ${noticeHtml}
+    ${filledHtml}
+    ${
+        run
+            ? ""
+            : `<p class="curation-tip">Tip: click <strong>✎ Curate</strong> on a successful run in the <a href="?view=dashboard">dashboard</a> to open this script with every value filled in for that job.</p>`
+    }
     <section class="curation-script">
         <div class="params-output-header">
             <span class="params-output-title">${run ? "Curation script" : "Curation script template"}</span>
