@@ -2912,7 +2912,13 @@ function normalizeCurationQuery(query) {
             q = location[1];
         }
     }
-    return q.replace(/^\/+|\/+$/g, "");
+    // Trim leading/trailing slashes with index scans (a /\/+$/ regex backtracks
+    // polynomially on long runs of "/").
+    let start = 0;
+    let end = q.length;
+    while (start < end && q.charCodeAt(start) === 47 /* "/" */) start++;
+    while (end > start && q.charCodeAt(end - 1) === 47) end--;
+    return q.slice(start, end);
 }
 
 function findCurationRun(runs, query) {

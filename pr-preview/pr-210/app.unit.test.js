@@ -1742,6 +1742,8 @@ describe("curation page", () => {
         expect(findCurationRun(runs, `${RUN_PATH}/`)).toBe(run);
         expect(findCurationRun(runs, `${RUN_PATH}/derivatives/postprocessed/rec.zarr`)).toBe(run);
         expect(findCurationRun(runs, derivativesUrl(RUN_PATH))).toBe(run);
+        expect(findCurationRun(runs, `//${RUN_PATH}///`)).toBe(run);
+        expect(findCurationRun(runs, `${"/".repeat(100000)}x`)).toBeNull();
         expect(findCurationRun(runs, "job-missing")).toBeNull();
         expect(findCurationRun(runs, "")).toBeNull();
     });
