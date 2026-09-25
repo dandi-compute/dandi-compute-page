@@ -2935,11 +2935,19 @@ function findCurationRun(runs, key) {
     return runs.find((run) => run.jobId === key || run.path === key) ?? null;
 }
 
+// Why a requested ?job= fell back to the placeholder template.
+const CURATION_FALLBACK_REASONS = {
+    missing: "was not found in the queue",
+    uncuratable: "has no <code>derivatives/postprocessed/</code> output to curate",
+    error: "could not be loaded",
+};
+
 // The Curation page: without a run, the script with placeholders and how to
 // find each value; with one (opened from a run card's ✎ Curate), the script
-// filled in for that job. *notice* explains why a requested job fell back to
-// placeholders.
-function renderCurationPage(run = null, notice = "") {
+// filled in for that job. *fallback* ({ jobKey, reason, detail? }, reason a
+// CURATION_FALLBACK_REASONS key) explains why a requested job fell back to
+// placeholders; every part of it is escaped here.
+function renderCurationPage(run = null, fallback = null) {
     const P = CURATION_PLACEHOLDERS;
     const values = curationScriptValues(run);
     const code = (text) => `<code>${e(text)}</code>`;
@@ -2954,7 +2962,10 @@ function renderCurationPage(run = null, notice = "") {
         <a href="${e(derivativesUrl(run.path))}" target="_blank" rel="noopener">↗ Derivatives${DANDI_ICON_HTML}</a>
     </div>`
         : "";
-    const noticeHtml = notice ? `<p class="curation-notice">${notice}</p>` : "";
+    const reasonHtml = fallback ? (CURATION_FALLBACK_REASONS[fallback.reason] ?? CURATION_FALLBACK_REASONS.error) : "";
+    const noticeHtml = fallback
+        ? `<p class="curation-notice">Job <code>${e(fallback.jobKey)}</code> ${reasonHtml}${fallback.detail ? ` (${e(fallback.detail)})` : ""}, so the script below shows placeholders.</p>`
+        : "";
     const placeholders = run ? [] : Object.values(P);
 
     const findSteps = run
@@ -3010,21 +3021,21 @@ function renderCurationPage(run = null, notice = "") {
 async function initCurationPage() {
     const jobKey = new URLSearchParams(window.location.search).get("job");
     let run = null;
-    let notice = "";
+    let fallback = null;
     if (jobKey) {
         try {
             run = findCurationRun(parseQueueEntries(await fetchQueueState()), jobKey);
             if (!run) {
-                notice = `Job <code>${e(jobKey)}</code> was not found in the queue, so the script below shows placeholders.`;
+                fallback = { jobKey, reason: "missing" };
             } else if (runPostprocessedAnalyzers(run).length === 0) {
-                notice = `Job <code>${e(jobKey)}</code> has no <code>derivatives/postprocessed/</code> output to curate, so the script below shows placeholders.`;
+                fallback = { jobKey, reason: "uncuratable" };
                 run = null;
             }
         } catch (err) {
-            notice = `Could not load job <code>${e(jobKey)}</code> (${e(err.message || "unknown error")}), so the script below shows placeholders.`;
+            fallback = { jobKey, reason: "error", detail: err.message || "unknown error" };
         }
     }
-    document.getElementById("runs").innerHTML = renderCurationPage(run, notice);
+    document.getElementById("runs").innerHTML = renderCurationPage(run, fallback);
     showDiffResults();
     document
         .querySelector(".curation-setup")
