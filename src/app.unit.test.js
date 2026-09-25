@@ -24,7 +24,6 @@ const {
     curationScript,
     curationScriptValues,
     curationExportScript,
-    curationUploadCommands,
     findCurationRun,
     initCurationPage,
     renderCurationLink,
@@ -1729,17 +1728,6 @@ describe("curation page", () => {
         expect(values.sourceNwbUrl).toBe("<SOURCE_NWB_URL>");
     });
 
-    it("builds upload commands for a Dandiset the user owns, organized to pass DANDI validation", () => {
-        const commands = curationUploadCommands();
-        expect(commands).toContain("to any Dandiset you own");
-        expect(commands).toContain("dandi download --download dandiset.yaml dandi://dandi/<YOUR_DANDISET_ID>/");
-        expect(commands).toContain("cd <YOUR_DANDISET_ID>");
-        expect(commands).toContain("dandi organize --files-mode copy ../curated");
-        expect(commands).toMatch(/\ndandi upload\n/);
-        expect(commands).not.toContain("--validation skip");
-        expect(commands).not.toContain("001697");
-    });
-
     it("links successful run cards to the filled-in curation page in a new tab", () => {
         const link = renderCurationLink(makeRun());
         expect(link).toContain('href="?view=curation&amp;job=job-26070830b5ff"');
@@ -1814,16 +1802,16 @@ describe("curation page", () => {
         expect(html).toContain("could not be loaded (&lt;b&gt;)");
     });
 
-    it("renders the export script and upload commands below the curation script", () => {
+    it("renders the export script below the curation script and links DANDI's upload instructions", () => {
         const html = renderCurationPage(makeRun());
-        expect(html).toContain("Export the curation to NWB and upload it to DANDI");
+        expect(html).toContain("Export the curation to NWB");
         expect(html.indexOf("Curation script")).toBeLessThan(html.indexOf("Export script"));
-        expect(html.indexOf("Export script")).toBeLessThan(html.indexOf("Upload commands"));
-        expect(html).toContain('class="language-shell"');
-        expect(html).toContain("pip install neuroconv remfile dandi");
-        // The target Dandiset is the user's own, so it stays a highlighted placeholder even for a filled-in job.
-        expect(html).toContain('<mark class="code-placeholder">&lt;YOUR_DANDISET_ID&gt;</mark>');
-        expect(html).not.toContain('<mark class="code-placeholder">&lt;ZARR_ID&gt;</mark>');
+        expect(html).toContain("pip install neuroconv remfile");
+        expect(html).toContain("upload the curated file to any Dandiset they own");
+        expect(html).toContain('href="https://docs.dandiarchive.org/user-guide-sharing/uploading-data/"');
+        expect(html).toContain('href="https://www.youtube.com/watch?v=OGlQtxzip-Q&amp;t=3s"');
+        expect(html).not.toContain("Upload commands");
+        expect(html).not.toContain("dandi organize");
         expect(renderCurationPage()).toContain('<mark class="code-placeholder">&lt;SOURCE_NWB_URL&gt;</mark>');
     });
 

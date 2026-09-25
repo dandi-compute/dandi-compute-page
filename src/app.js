@@ -2753,6 +2753,7 @@ function renderQualityControlSection(qc) {
 const DANDI_ZARR_S3_BASE = "s3://dandiarchive/zarr";
 const SPIKEINTERFACE_GUI_URL = "https://github.com/SpikeInterface/spikeinterface-gui";
 const SPIKEINTERFACE_GUI_INSTALL = 'pip install "spikeinterface-gui[desktop]" s3fs';
+const SPIKEINTERFACE_GUI_TUTORIAL_URL = "https://www.youtube.com/watch?v=OGlQtxzip-Q&t=3s";
 
 function dandiZarrS3Url(zarrId) {
     return `${DANDI_ZARR_S3_BASE}/${zarrId}/`;
@@ -2885,7 +2886,8 @@ run_mainwindow(
 `;
 }
 
-const CURATION_EXPORT_INSTALL = "pip install neuroconv remfile dandi";
+const CURATION_EXPORT_INSTALL = "pip install neuroconv remfile";
+const DANDI_UPLOAD_DOCS_URL = "https://docs.dandiarchive.org/user-guide-sharing/uploading-data/";
 
 // Python script that applies a saved curation to the job's analyzer and writes
 // the curated units to a standalone NWB file (the curation JSON is embedded in
@@ -2894,8 +2896,7 @@ const CURATION_EXPORT_INSTALL = "pip install neuroconv remfile dandi";
 // no recording, so neuroconv gets a data-less stand-in carrying the analyzer's
 // channel metadata for the electrodes table; template_metrics saved by older
 // spikeinterface versions can't be carried through merges/splits, so they are
-// recomputed from the curated templates; and the result passes
-// `dandi validate` once `dandi organize` has named it.
+// recomputed from the curated templates. The result passes `dandi validate`.
 function curationExportScript({ jobLabel, capsulePath, analyzers, sourceAsset, sourceNwbUrl }) {
     return `# Export the curated sorting of ${jobLabel} to NWB, ready to upload to DANDI.
 # Run it next to the curation JSON; it writes ./curated/<job>_<recording>_curated.nwb.
@@ -2982,30 +2983,6 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 nwb_path = OUTPUT_DIR / f"${jobLabel}_{RECORDING}_curated.nwb"
 configure_and_write_nwbfile(nwbfile, nwbfile_path=nwb_path)
 print(f"Wrote {nwb_path.resolve()}")
-`;
-}
-
-// Placeholder for the Dandiset the curated file is uploaded to: anyone can
-// upload to a Dandiset they own, so it is never filled in from the job.
-const CURATION_TARGET_DANDISET_PLACEHOLDER = "<YOUR_DANDISET_ID>";
-
-// Shell commands after the export script: fetch the target Dandiset's
-// metadata file (the local tree dandi needs), let `dandi organize` name the
-// curated file by DANDI's layout (so it passes upload validation), upload.
-function curationUploadCommands() {
-    const dandisetId = CURATION_TARGET_DANDISET_PLACEHOLDER;
-    return `# Upload the curated NWB file to any Dandiset you own (create one at https://dandiarchive.org)
-
-# 1. Get a local copy of your Dandiset's metadata (creates ./${dandisetId}/dandiset.yaml)
-dandi download --download dandiset.yaml dandi://dandi/${dandisetId}/
-
-# 2. Copy the curated file in, named by DANDI's layout (sub-<subject>/sub-<subject>_..._ecephys.nwb)
-cd ${dandisetId}
-dandi organize --files-mode copy ../curated
-
-# 3. Upload it with your DANDI API key (dandiarchive.org → your profile → API key)
-export DANDI_API_KEY="your-api-key"
-dandi upload
 `;
 }
 
@@ -3110,7 +3087,6 @@ function renderCurationPage(run = null, fallback = null) {
     const placeholders = run
         ? Object.values(P).filter((token) => token === values.sourceAsset || token === values.sourceNwbUrl)
         : Object.values(P);
-    const uploadPlaceholders = [...placeholders, CURATION_TARGET_DANDISET_PLACEHOLDER];
 
     const derivativesLink = `<a href="${e(derivativesUrl("derivatives"))}" target="_blank" rel="noopener">Dandiset ${e(DERIVATIVES_DANDISET_ID)}'s derivatives</a>`;
     const steps = [
@@ -3125,9 +3101,9 @@ function renderCurationPage(run = null, fallback = null) {
               ]),
         `Install <a href="${e(SPIKEINTERFACE_GUI_URL)}" target="_blank" rel="noopener">SpikeInterface GUI</a> with S3 support: <code>${e(SPIKEINTERFACE_GUI_INSTALL)}</code>.`,
         `Copy the curation script, save it (e.g.&nbsp;<code>curate.py</code>) and run it with Python. Loading the analyzer's extensions takes a minute or two over the network.`,
-        `Label, merge, split or remove units in the curation panel, then click <strong>Save curation</strong>. The archive copy is read-only, so the curation is saved to a local JSON file in the SpikeInterface curation format; re-running the script resumes from it. The traces view is disabled because the postprocessed output does not include the recording.`,
+        `Label, merge, split or remove units in the curation panel (new to it? watch the <a href="${e(SPIKEINTERFACE_GUI_TUTORIAL_URL)}" target="_blank" rel="noopener">SpikeInterface GUI video tutorial</a>), then click <strong>Save curation</strong>. The archive copy is read-only, so the curation is saved to a local JSON file in the SpikeInterface curation format; re-running the script resumes from it. The traces view is disabled because the postprocessed output does not include the recording.`,
         `To share the curation, install the export tools (<code>${e(CURATION_EXPORT_INSTALL)}</code>) and run the export script (e.g.&nbsp;<code>export_curation.py</code>) next to the curation JSON. It applies the curation and writes the curated units to a standalone NWB file in <code>curated/</code>: labels in a <code>quality</code> column, merged and split units flagged, the curation JSON in the file's notes, and the session and subject metadata copied from the job's source asset.`,
-        `Anyone can then upload the curated file to any Dandiset they own (<a href="https://dandiarchive.org" target="_blank" rel="noopener">create one on DANDI</a> if needed): set ${code(CURATION_TARGET_DANDISET_PLACEHOLDER)} in the upload commands to its ID and run them with your DANDI API key. <code>dandi organize</code> names the file by DANDI's layout, so it passes <code>dandi upload</code>'s validation.`,
+        `Anyone can then upload the curated file to any Dandiset they own by following <a href="${e(DANDI_UPLOAD_DOCS_URL)}" target="_blank" rel="noopener">DANDI's upload instructions</a>.`,
     ];
     const stepsHtml = steps
         .map(
@@ -3157,14 +3133,8 @@ function renderCurationPage(run = null, fallback = null) {
             : `<p class="curation-tip">Tip: click <strong>✎ Curate</strong> on a successful run in the <a href="?view=dashboard">dashboard</a> to open these scripts with every value filled in for that job.</p>`
     }
     ${scriptSection("Curation script", curationScript(values))}
-    <h2 class="curation-section-heading">Export the curation to NWB and upload it to DANDI</h2>
+    <h2 class="curation-section-heading">Export the curation to NWB</h2>
     ${scriptSection("Export script", curationExportScript(values))}
-    <section class="curation-script">
-        <div class="params-output-header">
-            <span class="params-output-title">Upload commands</span>
-        </div>
-        ${renderCopyableCode(curationUploadCommands(), uploadPlaceholders, "shell")}
-    </section>
 </div>`;
 }
 
@@ -6289,7 +6259,6 @@ if (typeof module !== "undefined" && module.exports) {
         initCurationPage,
         curationScriptValues,
         curationExportScript,
-        curationUploadCommands,
         renderCurationLink,
         renderGroupBadges,
         renderCurationPage,
