@@ -978,6 +978,13 @@ details[open] > .run-section-title::before {
     overflow: hidden;
 }
 
+.curation-section-heading {
+    margin: 12px 0 0;
+    font-size: 1.1em;
+    font-weight: 600;
+    color: var(--color-text);
+}
+
 .curation-script .code-block {
     border: none;
     border-radius: 0;

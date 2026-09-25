@@ -2791,18 +2791,30 @@ const CURATION_PLACEHOLDERS = {
     capsulePath: "<JOB_CAPSULE_PATH>",
     recording: "<RECORDING_NAME>",
     zarrId: "<ZARR_ID>",
+    sourceAsset: "<SOURCE_ASSET>",
+    sourceNwbUrl: "<SOURCE_NWB_URL>",
 };
 
-// Values filled into the curation script: a run's own, or the placeholders.
+// Values filled into the curation, export and upload scripts: a run's own, or
+// the placeholders. The source asset is the NWB file the job processed.
 function curationScriptValues(run = null) {
+    const P = CURATION_PLACEHOLDERS;
     if (!run) {
         return {
-            jobLabel: CURATION_PLACEHOLDERS.jobId,
-            capsulePath: CURATION_PLACEHOLDERS.capsulePath,
-            analyzers: [{ name: CURATION_PLACEHOLDERS.recording, url: dandiZarrS3Url(CURATION_PLACEHOLDERS.zarrId) }],
+            jobLabel: P.jobId,
+            capsulePath: P.capsulePath,
+            analyzers: [{ name: P.recording, url: dandiZarrS3Url(P.zarrId) }],
+            sourceAsset: P.sourceAsset,
+            sourceNwbUrl: P.sourceNwbUrl,
         };
     }
-    return { jobLabel: runJobLabel(run), capsulePath: run.path, analyzers: runPostprocessedAnalyzers(run) };
+    return {
+        jobLabel: runJobLabel(run),
+        capsulePath: run.path,
+        analyzers: runPostprocessedAnalyzers(run),
+        sourceAsset: run.dandiPath ? `DANDI:${run.dandisetId}/${run.dandiPath}` : P.sourceAsset,
+        sourceNwbUrl: (run.contentHash && blobUrl(run.contentHash)) || P.sourceNwbUrl,
+    };
 }
 
 // Python script that opens one of a job's analyzers in the SpikeInterface
@@ -2810,13 +2822,20 @@ function curationScriptValues(run = null) {
 // "Save curation" button writes (and a re-run resumes from) a local JSON file
 // in the spikeinterface curation format. JSON string literals are valid
 // Python string literals, so JSON.stringify quotes every interpolated value.
-function curationScript({ jobLabel, capsulePath, analyzers }) {
-    const py = (value) => JSON.stringify(String(value));
-    const analyzerLines = analyzers.map((a) => `    ${py(a.name)}: ${py(a.url)},`).join("\n");
+const pyString = (value) => JSON.stringify(String(value));
+
+// The ANALYZERS dict and RECORDING choice shared by the curation and export
+// scripts (the export script must pick the same recording).
+function curationAnalyzerLines(analyzers) {
+    const analyzerLines = analyzers.map((a) => `    ${pyString(a.name)}: ${pyString(a.url)},`).join("\n");
     const choice =
         analyzers.length > 1
-            ? `# This job has ${analyzers.length} recordings; pick the one to curate.\nRECORDING = ${py(analyzers[0].name)}`
-            : `RECORDING = ${py(analyzers[0].name)}`;
+            ? `# This job has ${analyzers.length} recordings; pick the one to curate.\nRECORDING = ${pyString(analyzers[0].name)}`
+            : `RECORDING = ${pyString(analyzers[0].name)}`;
+    return `ANALYZERS = {\n${analyzerLines}\n}\n${choice}`;
+}
+
+function curationScript({ jobLabel, capsulePath, analyzers }) {
     return `# Curate ${jobLabel} with SpikeInterface GUI, streaming its postprocessed
 # SortingAnalyzer from the DANDI Archive (nothing is downloaded up front).
 #
@@ -2830,10 +2849,7 @@ import spikeinterface as si
 from spikeinterface_gui import run_mainwindow
 
 # Postprocessed recordings of this job (DANDI Zarr asset IDs on the public S3 bucket)
-ANALYZERS = {
-${analyzerLines}
-}
-${choice}
+${curationAnalyzerLines(analyzers)}
 
 # The DANDI copy is read-only: "Save curation" writes to (and a re-run resumes from) this file.
 CURATION_FILE = Path(f"${jobLabel}_{RECORDING}_curation.json")
@@ -2869,17 +2885,138 @@ run_mainwindow(
 `;
 }
 
+const CURATION_EXPORT_INSTALL = "pip install neuroconv remfile dandi";
+
+// Python script that applies a saved curation to the job's analyzer and writes
+// the curated units to NWB (plus a copy of the curation JSON) inside a local
+// copy of the derivatives Dandiset, at the job capsule's derivatives/curated/,
+// ready for `dandi upload`. Verified against spikeinterface 0.105 / neuroconv
+// 0.10: the analyzer has no recording, so neuroconv gets a data-less stand-in
+// carrying the analyzer's channel metadata for the electrodes table; and
+// template_metrics saved by older spikeinterface versions can't be carried
+// through merges/splits, so they are recomputed from the curated templates.
+function curationExportScript({ jobLabel, capsulePath, analyzers, sourceAsset, sourceNwbUrl }) {
+    return `# Export the curated sorting of ${jobLabel} to NWB, ready to upload to DANDI.
+# Run it next to the curation JSON, after \`dandi download --download dandiset.yaml\` (see the upload commands).
+#
+#   ${CURATION_EXPORT_INSTALL}
+#
+# Job capsule: ${capsulePath}
+import json
+import shutil
+import uuid
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pynwb
+import remfile
+import spikeinterface as si
+from neuroconv.tools.nwb_helpers import configure_and_write_nwbfile, make_nwbfile_from_metadata
+from neuroconv.tools.spikeinterface import add_sorting_analyzer_to_nwbfile
+from spikeinterface.curation import apply_curation
+
+${curationAnalyzerLines(analyzers)}
+CURATION_FILE = Path(f"${jobLabel}_{RECORDING}_curation.json")
+
+# The asset the job processed; its session start time and subject are copied into the curated file.
+SOURCE_ASSET = ${pyString(sourceAsset)}
+SOURCE_NWB_URL = ${pyString(sourceNwbUrl)}
+
+# Local copy of Dandiset ${DERIVATIVES_DANDISET_ID} (from \`dandi download --download dandiset.yaml\`) and the output folder in it.
+DANDISET_DIR = Path(${pyString(DERIVATIVES_DANDISET_ID)})
+OUTPUT_DIR = DANDISET_DIR / ${pyString(capsulePath)} / "derivatives" / "curated"
+
+curation = json.loads(CURATION_FILE.read_text())
+
+# Stream only the extensions the NWB units table needs (not waveforms or principal components).
+analyzer = si.load_sorting_analyzer(ANALYZERS[RECORDING], load_extensions=False)
+for extension in ("random_spikes", "noise_levels", "templates", "quality_metrics"):
+    analyzer.load_extension(extension)
+
+# Merges are approximated from the saved templates (the raw traces are not in the postprocessed
+# output), so merged units must share most of their channels; lower SPARSITY_OVERLAP to relax this.
+SPARSITY_OVERLAP = 0.75
+curated = apply_curation(analyzer, curation, sparsity_overlap=SPARSITY_OVERLAP)
+curated.compute("template_metrics")  # recomputed from the curated templates
+
+# The analyzer has no recording attached; the NWB electrodes table only needs its channel
+# metadata, so give the writer a data-less stand-in recording that carries it.
+recording = si.NumpyRecording(
+    [np.zeros((1, curated.get_num_channels()), dtype="float32")],
+    sampling_frequency=curated.sampling_frequency,
+    channel_ids=curated.channel_ids,
+)
+for key, values in curated.rec_attributes["properties"].items():
+    recording.set_property(key, values)
+
+with h5py.File(remfile.File(SOURCE_NWB_URL), "r") as file, pynwb.NWBHDF5IO(file=file, load_namespaces=True) as io:
+    source = io.read()
+    metadata = {
+        "NWBFile": {
+            "session_description": (
+                f"Spike sorting of {SOURCE_ASSET} ({RECORDING}) by the AIND Ephys pipeline (${jobLabel}), "
+                "curated with SpikeInterface GUI."
+            ),
+            "identifier": str(uuid.uuid4()),
+            "session_start_time": source.session_start_time,
+            "notes": json.dumps(curation),
+        },
+        "Subject": {
+            key: getattr(source.subject, key)
+            for key in ("subject_id", "species", "sex", "age", "date_of_birth", "description", "strain", "genotype")
+            if source.subject is not None and getattr(source.subject, key, None) is not None
+        },
+    }
+
+nwbfile = make_nwbfile_from_metadata(metadata)
+add_sorting_analyzer_to_nwbfile(
+    curated,
+    nwbfile=nwbfile,
+    metadata=metadata,
+    recording=recording,
+    units_description=f"Units of {RECORDING} after curation with SpikeInterface GUI (curation JSON in /general/notes).",
+)
+nwbfile.units.resolution = 1 / curated.sampling_frequency
+
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+nwb_path = OUTPUT_DIR / f"{RECORDING}_curated.nwb"
+configure_and_write_nwbfile(nwbfile, nwbfile_path=nwb_path)
+shutil.copy(CURATION_FILE, OUTPUT_DIR / f"{RECORDING}_curation.json")
+print(f"Wrote {nwb_path.resolve()} and its curation JSON")
+`;
+}
+
+// Shell commands around the export script: fetch the derivatives Dandiset's
+// metadata file (the local tree dandi upload needs), then upload the job
+// capsule's derivatives/curated/ folder. Mirrors dandi-compute-core's own
+// uploads (--allow-any-path, and --validation skip because job capsules don't
+// follow DANDI's NWB file naming layout).
+function curationUploadCommands({ capsulePath }) {
+    const dandisetId = DERIVATIVES_DANDISET_ID;
+    return `# 1. Before running the export script: get a local copy of Dandiset ${dandisetId}'s metadata (creates ./${dandisetId}/dandiset.yaml)
+dandi download --download dandiset.yaml dandi://dandi/${dandisetId}/
+
+# 2. Run the export script (it writes into ./${dandisetId}/.../derivatives/curated/)
+
+# 3. Upload the curated NWB file and curation JSON (needs a DANDI API key with owner access to Dandiset ${dandisetId})
+export DANDI_API_KEY="your-api-key"
+cd ${dandisetId}
+dandi upload --allow-any-path --validation skip "${capsulePath}/derivatives/curated"
+`;
+}
+
 // Code block with a copy button (wired up by initCopyCodeButtons). Each of
 // *placeholders* is highlighted in the rendered code; the copied text is the
 // plain code.
-function renderCopyableCode(code, placeholders = []) {
+function renderCopyableCode(code, placeholders = [], language = "python") {
     let html = e(code);
     for (const token of placeholders) {
         html = html.split(e(token)).join(`<mark class="code-placeholder">${e(token)}</mark>`);
     }
     return `<div class="code-block">
     <button type="button" class="copy-code-btn" aria-label="Copy code to clipboard" title="Copy">${COPY_ICON}</button>
-    <pre class="code-block-pre"><code class="language-python">${html}</code></pre>
+    <pre class="code-block-pre"><code class="language-${e(language)}">${html}</code></pre>
 </div>`;
 }
 
@@ -2964,55 +3101,58 @@ function renderCurationPage(run = null, fallback = null) {
         : "";
     const reasonHtml = fallback ? (CURATION_FALLBACK_REASONS[fallback.reason] ?? CURATION_FALLBACK_REASONS.error) : "";
     const noticeHtml = fallback
-        ? `<p class="curation-notice">Job <code>${e(fallback.jobKey)}</code> ${reasonHtml}${fallback.detail ? ` (${e(fallback.detail)})` : ""}, so the script below shows placeholders.</p>`
+        ? `<p class="curation-notice">Job <code>${e(fallback.jobKey)}</code> ${reasonHtml}${fallback.detail ? ` (${e(fallback.detail)})` : ""}, so the scripts below show placeholders.</p>`
         : "";
     const placeholders = run ? [] : Object.values(P);
 
-    const findSteps = run
-        ? `<div class="params-instructions-step">
-            <span class="params-instructions-num">1</span>
-            <span>The script below is filled in with this job's postprocessed <code>SortingAnalyzer</code> Zarr asset${values.analyzers.length === 1 ? "" : "s"}, streamed from the DANDI Archive's public S3 bucket instead of being downloaded.${values.analyzers.length > 1 ? " Set <code>RECORDING</code> to the recording you want to curate." : ""}</span>
+    const derivativesLink = `<a href="${e(derivativesUrl("derivatives"))}" target="_blank" rel="noopener">Dandiset ${e(DERIVATIVES_DANDISET_ID)}'s derivatives</a>`;
+    const steps = [
+        ...(run
+            ? [
+                  `The scripts below are filled in with this job's postprocessed <code>SortingAnalyzer</code> Zarr asset${values.analyzers.length === 1 ? "" : "s"}, streamed from the DANDI Archive's public S3 bucket instead of being downloaded.${values.analyzers.length > 1 ? " Set <code>RECORDING</code> (the same in both scripts) to the recording you want to curate." : ""}`,
+              ]
+            : [
+                  `Find the run's job capsule in ${derivativesLink} (a run card's <strong>↗ Derivatives</strong> button opens it). ${code(P.jobId)} is the capsule's folder name (<code>job-…</code>) and ${code(P.capsulePath)} its full path.`,
+                  `Open the capsule's <code>derivatives/postprocessed/</code> folder: each <code>${e(P.recording)}.zarr</code> asset is one recording's <code>SortingAnalyzer</code>. Its ${code(P.zarrId)} is in the asset's metadata, whose <code>contentUrl</code> includes <code>https://dandiarchive.s3.amazonaws.com/zarr/${e(P.zarrId)}/</code>. It is also the asset's <code>content_id</code> in the Dandiset's <code>derivatives/paths.tsv</code>. Add one <code>ANALYZERS</code> entry per recording and set <code>RECORDING</code> to the one to curate.`,
+                  `For the export, ${code(P.sourceAsset)} names the NWB file the job processed (<code>DANDI:&lt;dandiset&gt;/&lt;path&gt;</code>, the run's <strong>Path</strong> on the dashboard) and ${code(P.sourceNwbUrl)} is its S3 URL: the <code>contentUrl</code> in that asset's metadata starting with <code>https://dandiarchive.s3.amazonaws.com/blobs/</code>.`,
+              ]),
+        `Install <a href="${e(SPIKEINTERFACE_GUI_URL)}" target="_blank" rel="noopener">SpikeInterface GUI</a> with S3 support: <code>${e(SPIKEINTERFACE_GUI_INSTALL)}</code>.`,
+        `Copy the curation script, save it (e.g.&nbsp;<code>curate.py</code>) and run it with Python. Loading the analyzer's extensions takes a minute or two over the network.`,
+        `Label, merge, split or remove units in the curation panel, then click <strong>Save curation</strong>. The archive copy is read-only, so the curation is saved to a local JSON file in the SpikeInterface curation format; re-running the script resumes from it. The traces view is disabled because the postprocessed output does not include the recording.`,
+        `To publish the curation, install the export tools (<code>${e(CURATION_EXPORT_INSTALL)}</code>), run the first upload command, then run the export script (e.g.&nbsp;<code>export_curation.py</code>) next to the curation JSON. It applies the curation and writes the curated units to NWB (labels in a <code>quality</code> column, merged and split units flagged, the curation JSON in the file's notes) plus a copy of the JSON into the job capsule's <code>derivatives/curated/</code> folder of a local copy of Dandiset ${e(DERIVATIVES_DANDISET_ID)}.`,
+        `Upload both files with the last upload commands. This needs a <a href="https://dandiarchive.org" target="_blank" rel="noopener">DANDI</a> API key with owner access to Dandiset ${e(DERIVATIVES_DANDISET_ID)}; without it, share the two files with the DANDI Compute maintainers.`,
+    ];
+    const stepsHtml = steps
+        .map(
+            (html, i) => `<div class="params-instructions-step">
+            <span class="params-instructions-num">${i + 1}</span>
+            <span>${html}</span>
         </div>`
-        : `<div class="params-instructions-step">
-            <span class="params-instructions-num">1</span>
-            <span>Find the run's job capsule in <a href="${e(derivativesUrl("derivatives"))}" target="_blank" rel="noopener">Dandiset ${e(DERIVATIVES_DANDISET_ID)}'s derivatives</a> (a run card's <strong>↗ Derivatives</strong> button opens it). ${code(P.jobId)} is the capsule's folder name (<code>job-…</code>) and ${code(P.capsulePath)} its full path; both only label the script and name the curation file.</span>
+        )
+        .join("");
+    const scriptSection = (title, codeText, language = "python") => `<section class="curation-script">
+        <div class="params-output-header">
+            <span class="params-output-title">${e(title)}${run ? "" : " template"}</span>
         </div>
-        <div class="params-instructions-step">
-            <span class="params-instructions-num">2</span>
-            <span>Open the capsule's <code>derivatives/postprocessed/</code> folder: each <code>${e(P.recording)}.zarr</code> asset is one recording's <code>SortingAnalyzer</code>. Its ${code(P.zarrId)} is in the asset's metadata, whose <code>contentUrl</code> includes <code>https://dandiarchive.s3.amazonaws.com/zarr/${e(P.zarrId)}/</code>. It is also the asset's <code>content_id</code> in the Dandiset's <code>derivatives/paths.tsv</code>. Add one <code>ANALYZERS</code> entry per recording and set <code>RECORDING</code> to the one to curate.</span>
-        </div>`;
-    const offset = run ? 1 : 2;
+        ${renderCopyableCode(codeText, placeholders, language)}
+    </section>`;
 
     return `<div class="curation-page">
     <details class="params-instructions curation-setup"${curationSetupOpen() ? " open" : ""}>
         <summary class="params-instructions-title curation-setup-title">How to curate a run</summary>
-        ${findSteps}
-        <div class="params-instructions-step">
-            <span class="params-instructions-num">${offset + 1}</span>
-            <span>Install <a href="${e(SPIKEINTERFACE_GUI_URL)}" target="_blank" rel="noopener">SpikeInterface GUI</a> with S3 support: <code>${e(SPIKEINTERFACE_GUI_INSTALL)}</code>.</span>
-        </div>
-        <div class="params-instructions-step">
-            <span class="params-instructions-num">${offset + 2}</span>
-            <span>Click the copy button on the script, save it (e.g.&nbsp;<code>curate.py</code>) and run it with Python. Loading the analyzer's extensions takes a minute or two over the network.</span>
-        </div>
-        <div class="params-instructions-step">
-            <span class="params-instructions-num">${offset + 3}</span>
-            <span>Label, merge, split or remove units in the curation panel, then click <strong>Save curation</strong>. The archive copy is read-only, so the curation is saved to a local JSON file in the SpikeInterface curation format; re-running the script resumes from it. The traces view is disabled because the postprocessed output does not include the recording.</span>
-        </div>
+        ${stepsHtml}
     </details>
     ${noticeHtml}
     ${filledHtml}
     ${
         run
             ? ""
-            : `<p class="curation-tip">Tip: click <strong>✎ Curate</strong> on a successful run in the <a href="?view=dashboard">dashboard</a> to open this script with every value filled in for that job.</p>`
+            : `<p class="curation-tip">Tip: click <strong>✎ Curate</strong> on a successful run in the <a href="?view=dashboard">dashboard</a> to open these scripts with every value filled in for that job.</p>`
     }
-    <section class="curation-script">
-        <div class="params-output-header">
-            <span class="params-output-title">${run ? "Curation script" : "Curation script template"}</span>
-        </div>
-        ${renderCopyableCode(curationScript(values), placeholders)}
-    </section>
+    ${scriptSection("Curation script", curationScript(values))}
+    <h2 class="curation-section-heading">Export the curation to NWB and upload it to DANDI</h2>
+    ${scriptSection("Export script", curationExportScript(values))}
+    ${scriptSection("Upload commands", curationUploadCommands(values), "shell")}
 </div>`;
 }
 
@@ -6136,6 +6276,8 @@ if (typeof module !== "undefined" && module.exports) {
         findCurationRun,
         initCurationPage,
         curationScriptValues,
+        curationExportScript,
+        curationUploadCommands,
         renderCurationLink,
         renderGroupBadges,
         renderCurationPage,

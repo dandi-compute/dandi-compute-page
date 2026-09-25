@@ -23,6 +23,8 @@ const {
     initCopyCodeButtons,
     curationScript,
     curationScriptValues,
+    curationExportScript,
+    curationUploadCommands,
     findCurationRun,
     initCurationPage,
     renderCurationLink,
@@ -1695,6 +1697,45 @@ describe("curation page", () => {
         expect(script).toContain('CURATION_FILE = Path(f"<JOB_ID>_{RECORDING}_curation.json")');
     });
 
+    it("fills the export script with the job's analyzers, source asset, and capsule output folder", () => {
+        const run = makeRun({ contentHash: "a05ac4e6-030f-49b7-ac62-e1aa74e54dcb" });
+        const script = curationExportScript(curationScriptValues(run));
+        expect(script).toContain("# Export the curated sorting of job-26070830b5ff to NWB");
+        expect(script).toContain('RECORDING = "block0_acquisition-ElectricalSeriesProbe00AP_recording1"');
+        expect(script).toContain('CURATION_FILE = Path(f"job-26070830b5ff_{RECORDING}_curation.json")');
+        expect(script).toContain('SOURCE_ASSET = "DANDI:000397/sub-Pt01/sub-Pt01_ecephys.nwb"');
+        expect(script).toContain(
+            'SOURCE_NWB_URL = "https://dandiarchive.s3.amazonaws.com/blobs/a05/ac4/a05ac4e6-030f-49b7-ac62-e1aa74e54dcb"'
+        );
+        expect(script).toContain('DANDISET_DIR = Path("001697")');
+        expect(script).toContain(`OUTPUT_DIR = DANDISET_DIR / "${RUN_PATH}" / "derivatives" / "curated"`);
+        expect(script).toContain("apply_curation(analyzer, curation, sparsity_overlap=SPARSITY_OVERLAP)");
+        expect(script).toContain('curated.compute("template_metrics")');
+        expect(script).toContain("nwbfile.units.resolution = 1 / curated.sampling_frequency");
+    });
+
+    it("uses placeholders in the export script when no job is given", () => {
+        const script = curationExportScript(curationScriptValues());
+        expect(script).toContain('SOURCE_ASSET = "<SOURCE_ASSET>"');
+        expect(script).toContain('SOURCE_NWB_URL = "<SOURCE_NWB_URL>"');
+        expect(script).toContain('OUTPUT_DIR = DANDISET_DIR / "<JOB_CAPSULE_PATH>" / "derivatives" / "curated"');
+        expect(script).toContain('    "<RECORDING_NAME>": "s3://dandiarchive/zarr/<ZARR_ID>/",');
+    });
+
+    it("falls back to source placeholders for a job without a source path or content id", () => {
+        const values = curationScriptValues(makeRun({ dandiPath: null, contentHash: null }));
+        expect(values.sourceAsset).toBe("<SOURCE_ASSET>");
+        expect(values.sourceNwbUrl).toBe("<SOURCE_NWB_URL>");
+    });
+
+    it("builds upload commands for the job capsule's curated folder, like the pipeline's own uploads", () => {
+        const commands = curationUploadCommands(curationScriptValues(makeRun()));
+        expect(commands).toContain("dandi download --download dandiset.yaml dandi://dandi/001697/");
+        expect(commands).toContain("cd 001697");
+        expect(commands).toContain(`dandi upload --allow-any-path --validation skip "${RUN_PATH}/derivatives/curated"`);
+        expect(curationUploadCommands(curationScriptValues())).toContain('"<JOB_CAPSULE_PATH>/derivatives/curated"');
+    });
+
     it("links successful run cards to the filled-in curation page in a new tab", () => {
         const link = renderCurationLink(makeRun());
         expect(link).toContain('href="?view=curation&amp;job=job-26070830b5ff"');
@@ -1767,6 +1808,17 @@ describe("curation page", () => {
         expect(html).not.toContain("<b>");
         expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
         expect(html).toContain("could not be loaded (&lt;b&gt;)");
+    });
+
+    it("renders the export script and upload commands below the curation script", () => {
+        const html = renderCurationPage(makeRun());
+        expect(html).toContain("Export the curation to NWB and upload it to DANDI");
+        expect(html.indexOf("Curation script")).toBeLessThan(html.indexOf("Export script"));
+        expect(html.indexOf("Export script")).toBeLessThan(html.indexOf("Upload commands"));
+        expect(html).toContain('class="language-shell"');
+        expect(html).toContain("pip install neuroconv remfile dandi");
+        expect(renderCurationPage()).toContain("Upload commands template");
+        expect(renderCurationPage()).toContain('<mark class="code-placeholder">&lt;SOURCE_NWB_URL&gt;</mark>');
     });
 
     it("renders the filled-in page for a job without placeholders", () => {
