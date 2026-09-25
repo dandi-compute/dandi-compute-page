@@ -1707,8 +1707,9 @@ describe("curation page", () => {
         expect(script).toContain(
             'SOURCE_NWB_URL = "https://dandiarchive.s3.amazonaws.com/blobs/a05/ac4/a05ac4e6-030f-49b7-ac62-e1aa74e54dcb"'
         );
-        expect(script).toContain('DANDISET_DIR = Path("001697")');
-        expect(script).toContain(`OUTPUT_DIR = DANDISET_DIR / "${RUN_PATH}" / "derivatives" / "curated"`);
+        expect(script).toContain('OUTPUT_DIR = Path("curated")');
+        expect(script).toContain('nwb_path = OUTPUT_DIR / f"job-26070830b5ff_{RECORDING}_curated.nwb"');
+        expect(script).not.toContain("001697");
         expect(script).toContain("apply_curation(analyzer, curation, sparsity_overlap=SPARSITY_OVERLAP)");
         expect(script).toContain('curated.compute("template_metrics")');
         expect(script).toContain("nwbfile.units.resolution = 1 / curated.sampling_frequency");
@@ -1718,7 +1719,7 @@ describe("curation page", () => {
         const script = curationExportScript(curationScriptValues());
         expect(script).toContain('SOURCE_ASSET = "<SOURCE_ASSET>"');
         expect(script).toContain('SOURCE_NWB_URL = "<SOURCE_NWB_URL>"');
-        expect(script).toContain('OUTPUT_DIR = DANDISET_DIR / "<JOB_CAPSULE_PATH>" / "derivatives" / "curated"');
+        expect(script).toContain('nwb_path = OUTPUT_DIR / f"<JOB_ID>_{RECORDING}_curated.nwb"');
         expect(script).toContain('    "<RECORDING_NAME>": "s3://dandiarchive/zarr/<ZARR_ID>/",');
     });
 
@@ -1728,12 +1729,15 @@ describe("curation page", () => {
         expect(values.sourceNwbUrl).toBe("<SOURCE_NWB_URL>");
     });
 
-    it("builds upload commands for the job capsule's curated folder, like the pipeline's own uploads", () => {
-        const commands = curationUploadCommands(curationScriptValues(makeRun()));
-        expect(commands).toContain("dandi download --download dandiset.yaml dandi://dandi/001697/");
-        expect(commands).toContain("cd 001697");
-        expect(commands).toContain(`dandi upload --allow-any-path --validation skip "${RUN_PATH}/derivatives/curated"`);
-        expect(curationUploadCommands(curationScriptValues())).toContain('"<JOB_CAPSULE_PATH>/derivatives/curated"');
+    it("builds upload commands for a Dandiset the user owns, organized to pass DANDI validation", () => {
+        const commands = curationUploadCommands();
+        expect(commands).toContain("to any Dandiset you own");
+        expect(commands).toContain("dandi download --download dandiset.yaml dandi://dandi/<YOUR_DANDISET_ID>/");
+        expect(commands).toContain("cd <YOUR_DANDISET_ID>");
+        expect(commands).toContain("dandi organize --files-mode copy ../curated");
+        expect(commands).toMatch(/\ndandi upload\n/);
+        expect(commands).not.toContain("--validation skip");
+        expect(commands).not.toContain("001697");
     });
 
     it("links successful run cards to the filled-in curation page in a new tab", () => {
@@ -1817,15 +1821,32 @@ describe("curation page", () => {
         expect(html.indexOf("Export script")).toBeLessThan(html.indexOf("Upload commands"));
         expect(html).toContain('class="language-shell"');
         expect(html).toContain("pip install neuroconv remfile dandi");
-        expect(renderCurationPage()).toContain("Upload commands template");
+        // The target Dandiset is the user's own, so it stays a highlighted placeholder even for a filled-in job.
+        expect(html).toContain('<mark class="code-placeholder">&lt;YOUR_DANDISET_ID&gt;</mark>');
+        expect(html).not.toContain('<mark class="code-placeholder">&lt;ZARR_ID&gt;</mark>');
         expect(renderCurationPage()).toContain('<mark class="code-placeholder">&lt;SOURCE_NWB_URL&gt;</mark>');
     });
 
-    it("renders the filled-in page for a job without placeholders", () => {
-        const html = renderCurationPage(makeRun());
+    it("highlights a source placeholder a filled-in job falls back to", () => {
+        const html = renderCurationPage(makeRun({ contentHash: null }));
+        expect(html).toContain('<mark class="code-placeholder">&lt;SOURCE_NWB_URL&gt;</mark>');
+        expect(html).not.toContain("&lt;ZARR_ID&gt;");
+    });
+
+    it("renders the filled-in page for a job without job placeholders", () => {
+        const html = renderCurationPage(makeRun({ contentHash: "a05ac4e6-030f-49b7-ac62-e1aa74e54dcb" }));
         expect(html).toContain("Filled in for <code>job-26070830b5ff</code>");
         expect(html).toContain("Dandiset 000397");
-        expect(html).not.toContain("code-placeholder");
+        for (const token of [
+            "JOB_ID",
+            "JOB_CAPSULE_PATH",
+            "RECORDING_NAME",
+            "ZARR_ID",
+            "SOURCE_ASSET",
+            "SOURCE_NWB_URL",
+        ]) {
+            expect(html).not.toContain(`&lt;${token}&gt;`);
+        }
         expect(html).not.toContain("&lt;ZARR_ID&gt;");
         expect(html).toContain("s3://dandiarchive/zarr/11111111-1111-1111-1111-111111111111/");
     });
