@@ -1756,6 +1756,18 @@ describe("curation page", () => {
         expect(renderCurationPage()).toMatch(/<details class="params-instructions curation-setup">/);
     });
 
+    it("escapes the requested job in the fallback notice", () => {
+        const html = renderCurationPage(null, {
+            jobKey: '<img src=x onerror="alert(1)">',
+            reason: "bogus",
+            detail: "<b>",
+        });
+        expect(html).not.toContain("<img");
+        expect(html).not.toContain("<b>");
+        expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+        expect(html).toContain("could not be loaded (&lt;b&gt;)");
+    });
+
     it("renders the filled-in page for a job without placeholders", () => {
         const html = renderCurationPage(makeRun());
         expect(html).toContain("Filled in for <code>job-26070830b5ff</code>");
@@ -1871,7 +1883,7 @@ describe("curation page", () => {
         it("falls back to placeholders with a notice when the queue can't be loaded", async () => {
             global.fetch = vi.fn(async () => new Response("", { status: 500 }));
             const { code, notice } = await openPage("&job=job-26070830b5ff");
-            expect(notice).toContain("Could not load job job-26070830b5ff");
+            expect(notice).toContain("Job job-26070830b5ff could not be loaded (Failed to load");
             expect(code).toContain("<ZARR_ID>");
         });
 
