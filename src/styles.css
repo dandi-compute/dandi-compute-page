@@ -906,6 +906,68 @@ details[open] > .run-section-title::before {
     text-decoration: none;
 }
 
+/* ─── Curation (SpikeInterface GUI) ─────────────────────────── */
+.curation-body {
+    padding: 4px 20px 16px;
+}
+
+.curation-intro {
+    margin: 0 0 10px;
+    font-size: 0.875em;
+    line-height: 1.55;
+    color: var(--color-text-secondary);
+}
+
+.curation-intro a {
+    color: var(--color-accent);
+    text-decoration: none;
+}
+
+.curation-intro a:hover {
+    text-decoration: underline;
+}
+
+.code-block {
+    position: relative;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+
+.code-block-pre {
+    margin: 0;
+    padding: 12px 14px;
+    max-height: 420px;
+    overflow: auto;
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.8em;
+    line-height: 1.5;
+    color: var(--color-text);
+    white-space: pre;
+}
+
+.copy-code-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    font-family: var(--font-main);
+    font-size: 0.8em;
+    color: var(--color-accent);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 3px 10px;
+    cursor: pointer;
+    transition:
+        border-color 0.15s,
+        background 0.15s;
+}
+
+.copy-code-btn:hover {
+    border-color: var(--color-accent);
+    background: var(--color-accent-subtle);
+}
+
 /* ─── Log file modal ────────────────────────────────────────── */
 .log-modal-overlay {
     position: fixed;

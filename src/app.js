@@ -2202,6 +2202,7 @@ function renderRunEntry(run) {
     ${hasTasks ? renderTraceSection(run.tasks) : ""}
     ${hasViz ? renderVisualizationSection(run.vizData, run.vizLinks) : ""}
     ${run.qualityControl ? renderQualityControlSection(run.qualityControl) : !run.qcLoaded && runHasQualityControl(run) ? renderSectionPlaceholder("qc", "Quality Control") : ""}
+    ${run.status === "success" ? renderCurationSection(run) : ""}
     ${hasLogs ? renderLogSection(run, buttonLogs) : ""}
     ${hasInline ? renderReportSection(run, inlineLogs) : ""}
 </div>`;
@@ -2736,6 +2737,166 @@ function renderQualityControlSection(qc) {
     </summary>
     ${stagesHtml}
 </details>`;
+}
+
+/* ─── Curation (SpikeInterface GUI) ─────────────────────────────
+   A successful run's postprocessed output is one SortingAnalyzer per
+   recording, each a DANDI Zarr asset under
+   "{run.path}/derivatives/postprocessed/<recording>.zarr". A Zarr asset's
+   content id in paths.tsv is its DANDI Zarr ID (not a blob id), and its store
+   lives at s3://dandiarchive/zarr/<zarr_id>/ -- which spikeinterface can open
+   directly (anonymously), so the GUI streams only the pieces it needs instead
+   of downloading the whole analyzer. The section renders a ready-to-run
+   script with the run's Zarr IDs filled in.                                  */
+const DANDI_ZARR_S3_BASE = "s3://dandiarchive/zarr";
+const SPIKEINTERFACE_GUI_URL = "https://github.com/SpikeInterface/spikeinterface-gui";
+const SPIKEINTERFACE_GUI_INSTALL = 'pip install "spikeinterface-gui[desktop]" s3fs';
+
+function dandiZarrS3Url(zarrId) {
+    return `${DANDI_ZARR_S3_BASE}/${zarrId}/`;
+}
+
+// The run's postprocessed analyzers, sorted by recording name:
+// [{ name, zarrId, url }]. Only direct children of the postprocessed/
+// directory count (a Zarr asset's store is a single paths.tsv row).
+function runPostprocessedAnalyzers(run) {
+    const outputPaths = run?.outputPaths;
+    if (!outputPaths || !run.path) return [];
+    const prefix = `${run.path}/derivatives/postprocessed/`;
+    const analyzers = [];
+    for (const [repoPath, zarrId] of Object.entries(outputPaths)) {
+        if (!repoPath.startsWith(prefix) || !zarrId) continue;
+        const fileName = repoPath.slice(prefix.length);
+        if (fileName.includes("/") || !fileName.toLowerCase().endsWith(".zarr")) continue;
+        analyzers.push({ name: fileName.slice(0, -".zarr".length), zarrId, url: dandiZarrS3Url(zarrId) });
+    }
+    return analyzers.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+// Job ID of a run: the queue's job_id, else its capsule directory name.
+function runJobLabel(run) {
+    if (run.jobId) return String(run.jobId);
+    const parts = String(run.path ?? "")
+        .split("/")
+        .filter(Boolean);
+    return parts[parts.length - 1] ?? "job";
+}
+
+// Python script that opens one of the run's analyzers in the SpikeInterface
+// GUI with the curation panel on. The DANDI copy is read-only, so the GUI's
+// "Save curation" button writes (and a re-run resumes from) a local JSON file
+// in the spikeinterface curation format. JSON string literals are valid
+// Python string literals, so JSON.stringify quotes every interpolated value.
+function curationScript(run, analyzers) {
+    const jobLabel = runJobLabel(run);
+    const py = (value) => JSON.stringify(String(value));
+    const analyzerLines = analyzers.map((a) => `    ${py(a.name)}: ${py(a.url)},`).join("\n");
+    const choice =
+        analyzers.length > 1
+            ? `# This job has ${analyzers.length} recordings; pick the one to curate.\nRECORDING = ${py(analyzers[0].name)}`
+            : `RECORDING = ${py(analyzers[0].name)}`;
+    return `# Curate ${jobLabel} with SpikeInterface GUI, streaming its postprocessed
+# SortingAnalyzer from the DANDI Archive (nothing is downloaded up front).
+#
+#   ${SPIKEINTERFACE_GUI_INSTALL}
+#
+# Job capsule: ${run.path}
+import json
+from pathlib import Path
+
+import spikeinterface as si
+from spikeinterface_gui import run_mainwindow
+
+# Postprocessed recordings of this job (DANDI Zarr asset IDs on the public S3 bucket)
+ANALYZERS = {
+${analyzerLines}
+}
+${choice}
+
+# The DANDI copy is read-only: "Save curation" writes to (and a re-run resumes from) this file.
+CURATION_FILE = Path(f"${jobLabel}_{RECORDING}_curation.json")
+
+analyzer = si.load_sorting_analyzer(ANALYZERS[RECORDING], load_extensions=False)
+
+if CURATION_FILE.exists():
+    curation = json.loads(CURATION_FILE.read_text())
+else:
+    curation = {
+        "format_version": "2",
+        "unit_ids": analyzer.unit_ids.tolist(),
+        "manual_labels": [],
+        "merges": [],
+        "splits": [],
+        "removed": [],
+    }
+
+
+def save_curation(curation_data):
+    CURATION_FILE.write_text(json.dumps(curation_data, indent=4, default=str))
+    print(f"Saved curation to {CURATION_FILE.resolve()}")
+
+
+run_mainwindow(
+    analyzer,
+    mode="desktop",  # or "web" (pip install "spikeinterface-gui[web]") to curate in a browser tab
+    curation=True,
+    curation_dict=curation,
+    curation_callback=save_curation,
+    with_traces=False,  # the postprocessed output does not include the recording's traces
+)
+`;
+}
+
+// Code block with a copy button (wired up by initCopyCodeButtons).
+function renderCopyableCode(code, language = "python") {
+    return `<div class="code-block">
+    <button type="button" class="copy-code-btn" aria-label="Copy code to clipboard">Copy</button>
+    <pre class="code-block-pre"><code class="language-${e(language)}">${e(code)}</code></pre>
+</div>`;
+}
+
+function renderCurationSection(run) {
+    const analyzers = runPostprocessedAnalyzers(run);
+    if (analyzers.length === 0) return "";
+    return `
+<details class="run-section" data-section="curation">
+    <summary class="run-section-title">
+        Curation
+        <span class="count-badge">${analyzers.length}</span>
+    </summary>
+    <div class="curation-body">
+        <p class="curation-intro">
+            Curate this run's sorting with
+            <a href="${e(SPIKEINTERFACE_GUI_URL)}" target="_blank" rel="noopener">SpikeInterface GUI</a>
+            by streaming its postprocessed analyzer directly from the DANDI Archive. Copy the script below, run it
+            with Python, and use <strong>Save curation</strong> in the GUI's curation panel to write your labels,
+            merges, splits and removals to a local JSON file.
+        </p>
+        ${renderCopyableCode(curationScript(run, analyzers))}
+    </div>
+</details>`;
+}
+
+// Clipboard handler for every .copy-code-btn on the page (run cards render
+// lazily and re-render in place, so this is one delegated listener).
+function initCopyCodeButtons() {
+    document.addEventListener("click", (evt) => {
+        const btn = evt.target.closest?.(".copy-code-btn");
+        if (!btn) return;
+        const code = btn.closest(".code-block")?.querySelector("code")?.textContent ?? "";
+        const done = (label) => {
+            btn.textContent = label;
+            setTimeout(() => (btn.textContent = "Copy"), 1500);
+        };
+        if (!navigator.clipboard?.writeText) {
+            done("Copy failed");
+            return;
+        }
+        navigator.clipboard.writeText(code).then(
+            () => done("Copied!"),
+            () => done("Copy failed")
+        );
+    });
 }
 
 // Collapsed stand-in for a section whose backing artifact has not been
@@ -3799,6 +3960,7 @@ function renderFlatRunEntry(run) {
     ${hasTasks ? renderTraceSection(run.tasks) : ""}
     ${hasViz ? renderVisualizationSection(run.vizData, run.vizLinks) : ""}
     ${run.qualityControl ? renderQualityControlSection(run.qualityControl) : !run.qcLoaded && runHasQualityControl(run) ? renderSectionPlaceholder("qc", "Quality Control") : ""}
+    ${run.status === "success" ? renderCurationSection(run) : ""}
     ${hasLogs ? renderLogSection(run, buttonLogs) : ""}
     ${hasInline ? renderReportSection(run, inlineLogs) : ""}
 </div>`;
@@ -4870,6 +5032,36 @@ function renderLandingPage() {
         </p>
     </section>
 
+    <section class="landing-card landing-curation">
+        <h2 class="landing-heading">Curating results with SpikeInterface GUI</h2>
+        <p>
+            Every successful run publishes its postprocessed spike sorting as one SpikeInterface
+            <code>SortingAnalyzer</code> per recording, stored as a Zarr asset under the job capsule's
+            <code>derivatives/postprocessed/</code> directory. Rather than downloading it, you can review and curate it
+            in
+            <a href="${e(SPIKEINTERFACE_GUI_URL)}" target="_blank" rel="noopener">SpikeInterface GUI</a>
+            in streaming mode: the analyzer is opened straight from the DANDI Archive's public S3 bucket and only the
+            pieces the GUI needs are fetched.
+        </p>
+        <ol class="landing-conditions">
+            <li>
+                On the <a href="?view=dashboard">Pipeline Results dashboard</a>, open a successful run and expand its
+                <strong>Curation</strong> section. It holds a ready-to-run script with that job's Zarr asset IDs
+                already filled in; use <strong>Copy</strong> to grab it.
+            </li>
+            <li>Install the GUI and S3 support: <code>${e(SPIKEINTERFACE_GUI_INSTALL)}</code>.</li>
+            <li>
+                Run the script with Python. Label, merge, split or remove units in the curation panel, then click
+                <strong>Save curation</strong>.
+            </li>
+        </ol>
+        <p class="landing-note">
+            The archive copy is read-only, so curation is saved to a local JSON file in the SpikeInterface curation
+            format. Re-running the script resumes from that file. The postprocessed output does not include the raw
+            traces, so the traces view is disabled.
+        </p>
+    </section>
+
     <section class="landing-card landing-resources">
         <h2 class="landing-heading">Explore &amp; resources</h2>
         <table class="landing-resources-table">
@@ -5640,6 +5832,7 @@ async function init() {
     initTheme();
     initVersion();
     initModal();
+    initCopyCodeButtons();
     initHydrationPromotion();
     initFlatShowMore();
     initInPageFilterNavigation();
@@ -5763,6 +5956,10 @@ if (typeof module !== "undefined" && module.exports) {
         fetchSlurmLogs,
         fetchVisualizationData,
         initModal,
+        initCopyCodeButtons,
+        curationScript,
+        renderCurationSection,
+        runPostprocessedAnalyzers,
         initLayoutToggle,
         loadQueueData,
         openHtmlModal,

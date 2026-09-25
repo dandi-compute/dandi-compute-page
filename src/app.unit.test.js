@@ -20,6 +20,10 @@ const {
     fetchSlurmLogs,
     fetchVisualizationData,
     initModal,
+    initCopyCodeButtons,
+    curationScript,
+    renderCurationSection,
+    runPostprocessedAnalyzers,
     initLayoutToggle,
     loadAindPipelineRegistries,
     normalizeConfigHash,
@@ -296,6 +300,8 @@ describe("app unit behavior", () => {
         expect(html).toContain('href="?view=dashboard"');
         expect(html).toContain("qualifying-aind-content-ids");
         expect(html).toContain("Explore &amp; resources");
+        expect(html).toContain("Curating results with SpikeInterface GUI");
+        expect(html).toContain("pip install &quot;spikeinterface-gui[desktop]&quot; s3fs");
     });
 
     it("includes all test-only dandisets used to scope dashboard and tests views", () => {
@@ -1583,6 +1589,137 @@ describe("pipeline registries", () => {
         expect(registries.configRegistry).toEqual(expect.arrayContaining([expect.objectContaining({ alias: "v1" })]));
         expect(warnSpy).toHaveBeenCalled();
         warnSpy.mockRestore();
+    });
+});
+
+describe("curation section", () => {
+    const RUN_PATH =
+        "derivatives/dandisets-000/dandiset-000397/sub-Pt01/sub-Pt01_ecephys/pipeline-aind+ephys/job-26070830b5ff";
+    const makeRun = (overrides = {}) => ({
+        status: "success",
+        attempt: 1,
+        tasks: [],
+        generatedBy: [],
+        vizData: null,
+        logFiles: [],
+        path: RUN_PATH,
+        jobId: "job-26070830b5ff",
+        dandiPath: "sub-Pt01/sub-Pt01_ecephys.nwb",
+        dandisetId: "000397",
+        subject: "Pt01",
+        session: null,
+        pipelineName: "aind+ephys",
+        pipelineVersion: "v1.2.4",
+        paramsProfile: "1cbdbee",
+        configHash: "7940dfd",
+        outputPaths: {
+            [`${RUN_PATH}/derivatives/postprocessed/block0_acquisition-ElectricalSeriesProbe01AP_recording1.zarr`]:
+                "22222222-2222-2222-2222-222222222222",
+            [`${RUN_PATH}/derivatives/postprocessed/block0_acquisition-ElectricalSeriesProbe00AP_recording1.zarr`]:
+                "11111111-1111-1111-1111-111111111111",
+            [`${RUN_PATH}/derivatives/visualization/drift_map.png`]: "77fdae74-59bc-44d3-ba30-5cd70322fd65",
+            [`${RUN_PATH}/logs/trace.txt`]: "5be809fd-5534-451c-bca2-d738df07b8ea",
+        },
+        ...overrides,
+    });
+
+    it("lists the run's postprocessed Zarr analyzers with their S3 locations, sorted by recording", () => {
+        expect(runPostprocessedAnalyzers(makeRun())).toEqual([
+            {
+                name: "block0_acquisition-ElectricalSeriesProbe00AP_recording1",
+                zarrId: "11111111-1111-1111-1111-111111111111",
+                url: "s3://dandiarchive/zarr/11111111-1111-1111-1111-111111111111/",
+            },
+            {
+                name: "block0_acquisition-ElectricalSeriesProbe01AP_recording1",
+                zarrId: "22222222-2222-2222-2222-222222222222",
+                url: "s3://dandiarchive/zarr/22222222-2222-2222-2222-222222222222/",
+            },
+        ]);
+    });
+
+    it("ignores files outside postprocessed/ and nested or non-Zarr entries", () => {
+        const run = makeRun({
+            outputPaths: {
+                [`${RUN_PATH}/derivatives/postprocessed/rec.zarr/zarr.json`]: "aaaaaaaa",
+                [`${RUN_PATH}/derivatives/postprocessed/notes.json`]: "bbbbbbbb",
+                [`${RUN_PATH}/derivatives/curated/rec.zarr`]: "cccccccc",
+            },
+        });
+        expect(runPostprocessedAnalyzers(run)).toEqual([]);
+        expect(runPostprocessedAnalyzers({ path: RUN_PATH })).toEqual([]);
+    });
+
+    it("fills the script with the job's Zarr IDs, capsule path, and a per-job curation file", () => {
+        const run = makeRun();
+        const script = curationScript(run, runPostprocessedAnalyzers(run));
+        expect(script).toContain("# Curate job-26070830b5ff with SpikeInterface GUI");
+        expect(script).toContain(`# Job capsule: ${RUN_PATH}`);
+        expect(script).toContain(
+            '    "block0_acquisition-ElectricalSeriesProbe00AP_recording1": "s3://dandiarchive/zarr/11111111-1111-1111-1111-111111111111/",'
+        );
+        expect(script).toContain(
+            '    "block0_acquisition-ElectricalSeriesProbe01AP_recording1": "s3://dandiarchive/zarr/22222222-2222-2222-2222-222222222222/",'
+        );
+        expect(script).toContain("# This job has 2 recordings; pick the one to curate.");
+        expect(script).toContain('RECORDING = "block0_acquisition-ElectricalSeriesProbe00AP_recording1"');
+        expect(script).toContain('CURATION_FILE = Path(f"job-26070830b5ff_{RECORDING}_curation.json")');
+        expect(script).toContain("load_sorting_analyzer(ANALYZERS[RECORDING], load_extensions=False)");
+        expect(script).toContain("curation_callback=save_curation");
+    });
+
+    it("omits the recording hint for single-recording jobs and falls back to the capsule name for the job", () => {
+        const run = makeRun({
+            jobId: null,
+            outputPaths: {
+                [`${RUN_PATH}/derivatives/postprocessed/rec1.zarr`]: "0aca22c2-1af0-496e-a1da-7e34ecd07c18",
+            },
+        });
+        const script = curationScript(run, runPostprocessedAnalyzers(run));
+        expect(script).not.toContain("pick the one to curate");
+        expect(script).toContain('RECORDING = "rec1"');
+        expect(script).toContain("# Curate job-26070830b5ff with SpikeInterface GUI");
+    });
+
+    it("renders an escaped, copyable script section", () => {
+        const html = renderCurationSection(makeRun());
+        expect(html).toContain('data-section="curation"');
+        expect(html).toContain('<span class="count-badge">2</span>');
+        expect(html).toContain('class="copy-code-btn"');
+        expect(html).toContain("&quot;s3://dandiarchive/zarr/11111111-1111-1111-1111-111111111111/&quot;");
+        expect(renderCurationSection(makeRun({ outputPaths: {} }))).toBe("");
+    });
+
+    it("shows the section on successful run cards only", () => {
+        expect(renderFlatList([makeRun()])).toContain('data-section="curation"');
+        expect(renderDandisets([makeRun()])).toContain('data-section="curation"');
+        expect(renderFlatList([makeRun({ status: "failed" })])).not.toContain('data-section="curation"');
+    });
+
+    it("copies the code block's script to the clipboard", async () => {
+        const writeText = vi.fn().mockResolvedValue(undefined);
+        const originalClipboard = navigator.clipboard;
+        Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+        const controller = new AbortController();
+        const originalAdd = document.addEventListener.bind(document);
+        const addSpy = vi
+            .spyOn(document, "addEventListener")
+            .mockImplementation((type, fn, opts) => originalAdd(type, fn, { ...opts, signal: controller.signal }));
+        try {
+            initCopyCodeButtons();
+            document.body.innerHTML = `<div id="runs">${renderCurationSection(makeRun())}</div>`;
+            const btn = document.querySelector(".copy-code-btn");
+            btn.click();
+            await Promise.resolve();
+            await Promise.resolve();
+            expect(writeText).toHaveBeenCalledTimes(1);
+            expect(writeText.mock.calls[0][0]).toBe(curationScript(makeRun(), runPostprocessedAnalyzers(makeRun())));
+            expect(btn.textContent).toBe("Copied!");
+        } finally {
+            addSpy.mockRestore();
+            controller.abort();
+            Object.defineProperty(navigator, "clipboard", { value: originalClipboard, configurable: true });
+        }
     });
 });
 
