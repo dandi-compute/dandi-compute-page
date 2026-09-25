@@ -94,7 +94,7 @@ let _openGroupKeys = new Set();
 const FLAT_RENDER_CHUNK = 200;
 let _flatRenderLimit = FLAT_RENDER_CHUNK;
 
-const ALLOWED_VIEW_MODES = new Set(["dashboard", "compare", "params", "tests", "archive"]);
+const ALLOWED_VIEW_MODES = new Set(["dashboard", "compare", "params", "curation", "tests", "archive"]);
 
 function parseViewMode() {
     const rawView = new URLSearchParams(window.location.search).get("view");
@@ -107,6 +107,7 @@ function syncTopNav(viewMode = parseViewMode()) {
         { selector: '.site-view-toggle-link[href="?view=dashboard"]', mode: "dashboard" },
         { selector: '.site-view-toggle-link[href="?view=compare"]', mode: "compare" },
         { selector: '.site-view-toggle-link[href="?view=params"]', mode: "params" },
+        { selector: '.site-view-toggle-link[href="?view=curation"]', mode: "curation" },
         { selector: '.site-view-toggle-link[href="?view=tests"]', mode: "tests" },
         { selector: '.site-view-toggle-link[href="?view=archive"]', mode: "archive" },
     ];
@@ -2195,6 +2196,7 @@ function renderRunEntry(run) {
         ${bytesHtml}
         <span class="run-attempt">${runIdentityLabel(run)}</span>
         <a class="run-entry-derivatives-link" href="${e(derivativesUrl(run.path))}" target="_blank" rel="noopener">↗ Derivatives${DANDI_ICON_HTML}</a>
+        ${renderCurationLink(run)}
     </div>
 
     ${hasSourceVersions ? renderSourceVersionsSection(run.generatedBy) : ""}
@@ -2202,7 +2204,6 @@ function renderRunEntry(run) {
     ${hasTasks ? renderTraceSection(run.tasks) : ""}
     ${hasViz ? renderVisualizationSection(run.vizData, run.vizLinks) : ""}
     ${run.qualityControl ? renderQualityControlSection(run.qualityControl) : !run.qcLoaded && runHasQualityControl(run) ? renderSectionPlaceholder("qc", "Quality Control") : ""}
-    ${run.status === "success" ? renderCurationSection(run) : ""}
     ${hasLogs ? renderLogSection(run, buttonLogs) : ""}
     ${hasInline ? renderReportSection(run, inlineLogs) : ""}
 </div>`;
@@ -2746,8 +2747,9 @@ function renderQualityControlSection(qc) {
    content id in paths.tsv is its DANDI Zarr ID (not a blob id), and its store
    lives at s3://dandiarchive/zarr/<zarr_id>/ -- which spikeinterface can open
    directly (anonymously), so the GUI streams only the pieces it needs instead
-   of downloading the whole analyzer. The section renders a ready-to-run
-   script with the run's Zarr IDs filled in.                                  */
+   of downloading the whole analyzer. The Curation page (?view=curation)
+   renders a ready-to-run script for a chosen job with its Zarr IDs filled
+   in; run cards link to it with the job preselected (&job=<id>).            */
 const DANDI_ZARR_S3_BASE = "s3://dandiarchive/zarr";
 const SPIKEINTERFACE_GUI_URL = "https://github.com/SpikeInterface/spikeinterface-gui";
 const SPIKEINTERFACE_GUI_INSTALL = 'pip install "spikeinterface-gui[desktop]" s3fs';
@@ -2787,14 +2789,15 @@ function runJobLabel(run) {
 // "Save curation" button writes (and a re-run resumes from) a local JSON file
 // in the spikeinterface curation format. JSON string literals are valid
 // Python string literals, so JSON.stringify quotes every interpolated value.
-function curationScript(run, analyzers) {
+function curationScript(run, analyzers, recording = null) {
     const jobLabel = runJobLabel(run);
     const py = (value) => JSON.stringify(String(value));
     const analyzerLines = analyzers.map((a) => `    ${py(a.name)}: ${py(a.url)},`).join("\n");
+    const chosen = analyzers.some((a) => a.name === recording) ? recording : analyzers[0].name;
     const choice =
         analyzers.length > 1
-            ? `# This job has ${analyzers.length} recordings; pick the one to curate.\nRECORDING = ${py(analyzers[0].name)}`
-            : `RECORDING = ${py(analyzers[0].name)}`;
+            ? `# This job has ${analyzers.length} recordings; pick the one to curate.\nRECORDING = ${py(chosen)}`
+            : `RECORDING = ${py(chosen)}`;
     return `# Curate ${jobLabel} with SpikeInterface GUI, streaming its postprocessed
 # SortingAnalyzer from the DANDI Archive (nothing is downloaded up front).
 #
@@ -2855,26 +2858,194 @@ function renderCopyableCode(code, language = "python") {
 </div>`;
 }
 
-function renderCurationSection(run) {
-    const analyzers = runPostprocessedAnalyzers(run);
-    if (analyzers.length === 0) return "";
-    return `
-<details class="run-section" data-section="curation">
-    <summary class="run-section-title">
-        Curation
-        <span class="count-badge">${analyzers.length}</span>
-    </summary>
-    <div class="curation-body">
-        <p class="curation-intro">
-            Curate this run's sorting with
-            <a href="${e(SPIKEINTERFACE_GUI_URL)}" target="_blank" rel="noopener">SpikeInterface GUI</a>
-            by streaming its postprocessed analyzer directly from the DANDI Archive. Copy the script below, run it
-            with Python, and use <strong>Save curation</strong> in the GUI's curation panel to write your labels,
-            merges, splits and removals to a local JSON file.
-        </p>
-        ${renderCopyableCode(curationScript(run, analyzers))}
+// Key identifying a run on the Curation page (?job=…): its job ID, else its
+// capsule path (older entries without a job_id).
+function runCurationKey(run) {
+    return run.jobId ?? run.path;
+}
+
+function curationPageUrl(run) {
+    return `?view=curation&job=${encodeURIComponent(runCurationKey(run))}`;
+}
+
+function isCuratableRun(run) {
+    return run.status === "success" && runPostprocessedAnalyzers(run).length > 0;
+}
+
+// Run-card header indicator: a link to the Curation page for curatable runs,
+// and a muted marker for successful runs whose capsule has no postprocessed
+// output (nothing to curate). Other statuses show nothing.
+function renderCurationLink(run) {
+    if (run.status !== "success") return "";
+    if (!isCuratableRun(run)) {
+        return `<span class="run-entry-curate-link run-entry-curate-missing" title="This job capsule has no derivatives/postprocessed output, so there is nothing to curate">✎ Not curatable</span>`;
+    }
+    return `<a class="run-entry-curate-link" href="${e(curationPageUrl(run))}" title="Curate this run's sorting with SpikeInterface GUI">✎ Curate</a>`;
+}
+
+/* ─── Curation page (?view=curation) ─────────────────────────── */
+let _curationRuns = [];
+
+// Jobs that can be curated: those with output and at least one postprocessed
+// analyzer, ordered by Dandiset, then asset path, newest first.
+function curationCandidates(runs) {
+    return runs
+        .filter((run) => run.hasOutput && runPostprocessedAnalyzers(run).length > 0)
+        .sort(
+            (a, b) =>
+                String(a.dandisetId).localeCompare(String(b.dandisetId)) ||
+                String(a.dandiPath ?? "").localeCompare(String(b.dandiPath ?? "")) ||
+                String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? ""))
+        );
+}
+
+// Accepts a job ID, a capsule path (or any path inside the capsule), or a
+// DANDI file-browser URL (…/files?location=<capsule path>) as shown by the
+// run cards' "Derivatives" link.
+function normalizeCurationQuery(query) {
+    let q = String(query ?? "").trim();
+    const location = q.match(/[?&]location=([^&#]+)/);
+    if (location) {
+        try {
+            q = decodeURIComponent(location[1]);
+        } catch {
+            q = location[1];
+        }
+    }
+    return q.replace(/^\/+|\/+$/g, "");
+}
+
+function findCurationRun(runs, query) {
+    const q = normalizeCurationQuery(query);
+    if (!q) return null;
+    return (
+        runs.find((run) => run.jobId === q || run.path === q) ??
+        runs.find((run) => run.path && q.startsWith(`${run.path}/`)) ??
+        null
+    );
+}
+
+function renderCurationJobDetails(run, analyzers, recording) {
+    const recordingHtml =
+        analyzers.length > 1
+            ? `<label class="curation-field">
+            <span class="curation-field-label">Recording</span>
+            <select id="curation-recording" class="curation-select">${analyzers
+                .map(
+                    (a) =>
+                        `<option value="${e(a.name)}"${a.name === recording ? " selected" : ""}>${e(a.name)}</option>`
+                )
+                .join("")}</select>
+        </label>`
+            : `<div class="curation-field">
+            <span class="curation-field-label">Recording</span>
+            <code class="curation-value">${e(analyzers[0].name)}</code>
+        </div>`;
+    const dandisetUrl = `${dandiBaseUrl(run.dandisetId)}/dandiset/${encodeURIComponent(run.dandisetId)}`;
+    return `<dl class="curation-job-meta">
+        <div><dt>Job</dt><dd><code class="curation-value">${e(runJobLabel(run))}</code></dd></div>
+        <div><dt>Dandiset</dt><dd><a href="${e(dandisetUrl)}" target="_blank" rel="noopener">${e(run.dandisetId)}</a></dd></div>
+        ${run.dandiPath ? `<div><dt>Asset</dt><dd>${e(run.dandiPath)}</dd></div>` : ""}
+        <div><dt>Capsule</dt><dd><a href="${e(derivativesUrl(run.path))}" target="_blank" rel="noopener">↗ Derivatives${DANDI_ICON_HTML}</a></dd></div>
+    </dl>
+    ${recordingHtml}`;
+}
+
+function renderCurationPage(runs, query = "") {
+    const options = runs
+        .map(
+            (run) =>
+                `<option value="${e(runCurationKey(run))}">${e(`Dandiset ${run.dandisetId} · ${run.dandiPath ?? run.path}`)}</option>`
+        )
+        .join("");
+    return `<div class="curation-page">
+    <section class="curation-panel">
+        <label class="curation-field" for="curation-job-input">
+            <span class="curation-field-label">Job</span>
+            <input id="curation-job-input" class="curation-input" type="text" list="curation-job-options"
+                value="${e(query)}" autocomplete="off" spellcheck="false"
+                placeholder="Job ID, job capsule path, or DANDI link to the capsule">
+        </label>
+        <datalist id="curation-job-options">${options}</datalist>
+        <p class="curation-hint">${runs.length} successful job${runs.length === 1 ? "" : "s"} with postprocessed output. Start typing to search, or open a run on the <a href="?view=dashboard">dashboard</a> and click <strong>✎ Curate</strong>.</p>
+        <div id="curation-job-details"></div>
+    </section>
+    <section class="curation-script">
+        <div class="params-output-header">
+            <span class="params-output-title">Generated script</span>
+        </div>
+        <div id="curation-script-body"></div>
+    </section>
+    <div class="params-instructions">
+        <div class="params-instructions-title">How to curate a run</div>
+        <div class="params-instructions-step">
+            <span class="params-instructions-num">1</span>
+            <span>Choose a job above. The script is filled in with its postprocessed <code>SortingAnalyzer</code> Zarr assets, which are streamed from the DANDI Archive's public S3 bucket instead of being downloaded.</span>
+        </div>
+        <div class="params-instructions-step">
+            <span class="params-instructions-num">2</span>
+            <span>Install <a href="${e(SPIKEINTERFACE_GUI_URL)}" target="_blank" rel="noopener">SpikeInterface GUI</a> with S3 support: <code>${e(SPIKEINTERFACE_GUI_INSTALL)}</code>.</span>
+        </div>
+        <div class="params-instructions-step">
+            <span class="params-instructions-num">3</span>
+            <span>Click <strong>Copy</strong>, save the script (e.g.&nbsp;<code>curate.py</code>) and run it with Python. Loading the analyzer's extensions takes a minute or two over the network.</span>
+        </div>
+        <div class="params-instructions-step">
+            <span class="params-instructions-num">4</span>
+            <span>Label, merge, split or remove units in the curation panel, then click <strong>Save curation</strong>. The archive copy is read-only, so the curation is saved to a local JSON file in the SpikeInterface curation format; re-running the script resumes from it. The traces view is disabled because the postprocessed output does not include the recording.</span>
+        </div>
     </div>
-</details>`;
+</div>`;
+}
+
+// Re-render the job details and script for the current input (and, when the
+// job changed, keep ?job= in sync so the page can be linked/reloaded).
+function updateCurationSelection({ syncUrl = true } = {}) {
+    const input = document.getElementById("curation-job-input");
+    const details = document.getElementById("curation-job-details");
+    const body = document.getElementById("curation-script-body");
+    if (!input || !details || !body) return;
+    const run = findCurationRun(_curationRuns, input.value);
+    if (!run) {
+        details.innerHTML = input.value.trim()
+            ? `<p class="curation-empty">No successful job with postprocessed output matches <code>${e(input.value.trim())}</code>.</p>`
+            : "";
+        body.innerHTML = `<p class="curation-empty curation-script-empty">Choose a job to generate its curation script.</p>`;
+        details.dataset.jobKey = "";
+        return;
+    }
+    const analyzers = runPostprocessedAnalyzers(run);
+    const key = runCurationKey(run);
+    const recordingSelect = document.getElementById("curation-recording");
+    const recording = details.dataset.jobKey === key && recordingSelect ? recordingSelect.value : analyzers[0].name;
+    if (details.dataset.jobKey !== key) {
+        details.innerHTML = renderCurationJobDetails(run, analyzers, recording);
+        details.dataset.jobKey = key;
+    }
+    body.innerHTML = renderCopyableCode(curationScript(run, analyzers, recording));
+    if (syncUrl) {
+        const params = new URLSearchParams(window.location.search);
+        if (params.get("job") !== key) {
+            params.set("job", key);
+            window.history.replaceState(null, "", `?${params.toString()}`);
+        }
+    }
+}
+
+async function initCurationPage() {
+    const entries = await fetchQueueState();
+    _curationRuns = curationCandidates(parseQueueEntries(entries));
+    const query = new URLSearchParams(window.location.search).get("job") ?? "";
+    document.getElementById("runs").innerHTML = renderCurationPage(_curationRuns, query);
+    showDiffResults();
+    const root = document.querySelector(".curation-page");
+    root.addEventListener("input", (evt) => {
+        if (evt.target.id === "curation-job-input") updateCurationSelection();
+    });
+    root.addEventListener("change", (evt) => {
+        if (evt.target.id === "curation-recording") updateCurationSelection();
+    });
+    updateCurationSelection({ syncUrl: false });
 }
 
 // Clipboard handler for every .copy-code-btn on the page (run cards render
@@ -2962,6 +3133,14 @@ function renderGroupBadges(runs) {
         parts.push(
             `<span class="gbadge gbadge-success${provisional ? " status-provisional" : ""}" title="${s} successful run${s !== 1 ? "s" : ""}${provisional ? " (pending trace confirmation)" : ""}">${s}&thinsp;✓</span>`
         );
+    if (s) {
+        // How many of the group's successful runs have postprocessed output
+        // that can be opened on the Curation page.
+        const c = runs.filter(isCuratableRun).length;
+        parts.push(
+            `<span class="gbadge gbadge-curatable${c ? "" : " gbadge-curatable-none"}" title="${c} of ${s} successful run${s !== 1 ? "s" : ""} ha${c === 1 ? "s" : "ve"} postprocessed output to curate">${c}/${s}&thinsp;✎</span>`
+        );
+    }
     if (u)
         parts.push(
             `<span class="gbadge gbadge-unknown" title="${u} unknown run${u !== 1 ? "s" : ""}">${u}&thinsp;?</span>`
@@ -3953,6 +4132,7 @@ function renderFlatRunEntry(run) {
         ${bytesHtml}
         <span class="run-attempt">${runIdentityLabel(run)}</span>
         <a class="run-entry-derivatives-link" href="${e(derivativesUrl(run.path))}" target="_blank" rel="noopener">↗ Derivatives${DANDI_ICON_HTML}</a>
+        ${renderCurationLink(run)}
     </div>
 
     ${hasSourceVersions ? renderSourceVersionsSection(run.generatedBy) : ""}
@@ -3960,7 +4140,6 @@ function renderFlatRunEntry(run) {
     ${hasTasks ? renderTraceSection(run.tasks) : ""}
     ${hasViz ? renderVisualizationSection(run.vizData, run.vizLinks) : ""}
     ${run.qualityControl ? renderQualityControlSection(run.qualityControl) : !run.qcLoaded && runHasQualityControl(run) ? renderSectionPlaceholder("qc", "Quality Control") : ""}
-    ${run.status === "success" ? renderCurationSection(run) : ""}
     ${hasLogs ? renderLogSection(run, buttonLogs) : ""}
     ${hasInline ? renderReportSection(run, inlineLogs) : ""}
 </div>`;
@@ -5032,36 +5211,6 @@ function renderLandingPage() {
         </p>
     </section>
 
-    <section class="landing-card landing-curation">
-        <h2 class="landing-heading">Curating results with SpikeInterface GUI</h2>
-        <p>
-            Every successful run publishes its postprocessed spike sorting as one SpikeInterface
-            <code>SortingAnalyzer</code> per recording, stored as a Zarr asset under the job capsule's
-            <code>derivatives/postprocessed/</code> directory. Rather than downloading it, you can review and curate it
-            in
-            <a href="${e(SPIKEINTERFACE_GUI_URL)}" target="_blank" rel="noopener">SpikeInterface GUI</a>
-            in streaming mode: the analyzer is opened straight from the DANDI Archive's public S3 bucket and only the
-            pieces the GUI needs are fetched.
-        </p>
-        <ol class="landing-conditions">
-            <li>
-                On the <a href="?view=dashboard">Pipeline Results dashboard</a>, open a successful run and expand its
-                <strong>Curation</strong> section. It holds a ready-to-run script with that job's Zarr asset IDs
-                already filled in; use <strong>Copy</strong> to grab it.
-            </li>
-            <li>Install the GUI and S3 support: <code>${e(SPIKEINTERFACE_GUI_INSTALL)}</code>.</li>
-            <li>
-                Run the script with Python. Label, merge, split or remove units in the curation panel, then click
-                <strong>Save curation</strong>.
-            </li>
-        </ol>
-        <p class="landing-note">
-            The archive copy is read-only, so curation is saved to a local JSON file in the SpikeInterface curation
-            format. Re-running the script resumes from that file. The postprocessed output does not include the raw
-            traces, so the traces view is disabled.
-        </p>
-    </section>
-
     <section class="landing-card landing-resources">
         <h2 class="landing-heading">Explore &amp; resources</h2>
         <table class="landing-resources-table">
@@ -5075,6 +5224,13 @@ function renderLandingPage() {
                 <tr>
                     <th scope="row"><a href="?view=dashboard">Pipeline Results dashboard</a></th>
                     <td>Browse processing runs across Dandisets.</td>
+                </tr>
+                <tr>
+                    <th scope="row"><a href="?view=curation">Curate sorting results</a></th>
+                    <td>
+                        Open a successful run's postprocessed spike sorting in SpikeInterface GUI, streamed from the
+                        DANDI Archive.
+                    </td>
                 </tr>
                 <tr>
                     <th scope="row">
@@ -5861,6 +6017,12 @@ async function init() {
             'Create a custom parameter file for the <a href="https://github.com/AllenNeuralDynamics/aind-ephys-pipeline" target="_blank" rel="noopener">AIND Ephys Pipeline</a> and submit it for use in the compute pipeline.'
         );
     }
+    if (_viewMode === "curation") {
+        setPageCopy(
+            "Curate Sorting Results",
+            'Generate a script that opens a successful run\'s postprocessed spike sorting in <a href="https://github.com/SpikeInterface/spikeinterface-gui" target="_blank" rel="noopener">SpikeInterface GUI</a>, streamed directly from the DANDI Archive.'
+        );
+    }
     if (_viewMode === "archive") {
         setPageCopy(
             "Archived Pipeline Runs",
@@ -5915,6 +6077,14 @@ async function init() {
         }
         return;
     }
+    if (_viewMode === "curation") {
+        try {
+            await initCurationPage();
+        } catch (err) {
+            showError(err.message || "Failed to load the job list.");
+        }
+        return;
+    }
     // Top display of current queue scheduling priorities. Irrelevant to the
     // archive page, which shows already-completed (failed) runs.
     if (_viewMode !== "archive") initQueuePriorities();
@@ -5958,7 +6128,12 @@ if (typeof module !== "undefined" && module.exports) {
         initModal,
         initCopyCodeButtons,
         curationScript,
-        renderCurationSection,
+        curationCandidates,
+        findCurationRun,
+        initCurationPage,
+        renderCurationLink,
+        renderGroupBadges,
+        renderCurationPage,
         runPostprocessedAnalyzers,
         initLayoutToggle,
         loadQueueData,

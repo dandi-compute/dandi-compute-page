@@ -907,26 +907,6 @@ details[open] > .run-section-title::before {
 }
 
 /* ─── Curation (SpikeInterface GUI) ─────────────────────────── */
-.curation-body {
-    padding: 4px 20px 16px;
-}
-
-.curation-intro {
-    margin: 0 0 10px;
-    font-size: 0.875em;
-    line-height: 1.55;
-    color: var(--color-text-secondary);
-}
-
-.curation-intro a {
-    color: var(--color-accent);
-    text-decoration: none;
-}
-
-.curation-intro a:hover {
-    text-decoration: underline;
-}
-
 .code-block {
     position: relative;
     background: var(--color-bg);
@@ -966,6 +946,140 @@ details[open] > .run-section-title::before {
 .copy-code-btn:hover {
     border-color: var(--color-accent);
     background: var(--color-accent-subtle);
+}
+
+/* ─── Curation page ─────────────────────────────────────────── */
+.curation-page {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    max-width: 1100px;
+    margin: 0 auto 40px;
+}
+
+.curation-panel,
+.curation-script {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+
+.curation-panel {
+    padding: 16px 20px;
+}
+
+.curation-script {
+    overflow: hidden;
+}
+
+.curation-script .code-block {
+    border: none;
+    border-radius: 0;
+}
+
+.curation-script .code-block-pre {
+    max-height: none;
+}
+
+.curation-field {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+}
+
+.curation-field:first-child {
+    margin-top: 0;
+}
+
+.curation-field-label {
+    flex-shrink: 0;
+    min-width: 80px;
+    font-size: 0.8em;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-text-secondary);
+}
+
+.curation-input,
+.curation-select {
+    flex: 1 1 auto;
+    min-width: 0;
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.85em;
+    color: var(--color-text);
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 7px 10px;
+}
+
+.curation-input:focus,
+.curation-select:focus {
+    outline: none;
+    border-color: var(--color-accent);
+}
+
+.curation-hint,
+.curation-empty {
+    margin: 8px 0 0;
+    font-size: 0.85em;
+    color: var(--color-text-secondary);
+}
+
+.curation-script-empty {
+    margin: 0;
+    padding: 16px 20px;
+}
+
+.curation-page a {
+    color: var(--color-accent);
+    text-decoration: none;
+}
+
+.curation-page a:hover {
+    text-decoration: underline;
+}
+
+.curation-page code,
+.curation-value {
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.88em;
+}
+
+.curation-job-meta {
+    display: grid;
+    gap: 4px;
+    margin: 14px 0 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--color-border);
+}
+
+.curation-job-meta > div {
+    display: flex;
+    gap: 12px;
+    font-size: 0.88em;
+}
+
+.curation-job-meta dt {
+    flex-shrink: 0;
+    min-width: 80px;
+    color: var(--color-text-secondary);
+}
+
+.curation-job-meta dd {
+    margin: 0;
+    color: var(--color-text);
+    word-break: break-word;
+}
+
+@media (max-width: 700px) {
+    .curation-field {
+        flex-direction: column;
+        align-items: stretch;
+        gap: 4px;
+    }
 }
 
 /* ─── Log file modal ────────────────────────────────────────── */
@@ -1464,6 +1578,15 @@ details[open] > .params-summary::before {
     border-radius: 10px;
     white-space: nowrap;
 }
+.gbadge-curatable {
+    background: var(--color-accent-subtle);
+    color: var(--color-accent);
+}
+.gbadge-curatable-none {
+    background: transparent;
+    border: 1px dashed var(--color-border);
+    color: var(--color-text-secondary);
+}
 .gbadge-success {
     background: var(--color-success-bg);
     color: var(--color-success);
@@ -1568,6 +1691,34 @@ details[open] > .params-summary::before {
     margin-left: 0.3em;
 }
 .run-entry-derivatives-link:hover {
+    color: var(--color-accent);
+    border-color: var(--color-accent);
+    background: var(--color-accent-subtle);
+    text-decoration: none;
+}
+
+.run-entry-curate-link {
+    font-size: 0.78em;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    color: var(--color-text-secondary);
+    text-decoration: none;
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 2px 8px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition:
+        color 0.15s,
+        border-color 0.15s,
+        background 0.15s;
+}
+.run-entry-curate-missing {
+    opacity: 0.6;
+    border-style: dashed;
+    cursor: help;
+}
+a.run-entry-curate-link:hover {
     color: var(--color-accent);
     border-color: var(--color-accent);
     background: var(--color-accent-subtle);
