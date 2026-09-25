@@ -2748,8 +2748,8 @@ function renderQualityControlSection(qc) {
    lives at s3://dandiarchive/zarr/<zarr_id>/ -- which spikeinterface can open
    directly (anonymously), so the GUI streams only the pieces it needs instead
    of downloading the whole analyzer. The Curation page (?view=curation)
-   renders a ready-to-run script for a chosen job with its Zarr IDs filled
-   in; run cards link to it with the job preselected (&job=<id>).            */
+   shows the script with placeholders; a run card's ✎ Curate opens it in a
+   new tab with that job's values filled in (&job=<id>).                     */
 const DANDI_ZARR_S3_BASE = "s3://dandiarchive/zarr";
 const SPIKEINTERFACE_GUI_URL = "https://github.com/SpikeInterface/spikeinterface-gui";
 const SPIKEINTERFACE_GUI_INSTALL = 'pip install "spikeinterface-gui[desktop]" s3fs';
@@ -2784,26 +2784,45 @@ function runJobLabel(run) {
     return parts[parts.length - 1] ?? "job";
 }
 
-// Python script that opens one of the run's analyzers in the SpikeInterface
+// Placeholders of the generic script on the Curation page (no job given);
+// the page's instructions explain where to find each value.
+const CURATION_PLACEHOLDERS = {
+    jobId: "<JOB_ID>",
+    capsulePath: "<JOB_CAPSULE_PATH>",
+    recording: "<RECORDING_NAME>",
+    zarrId: "<ZARR_ID>",
+};
+
+// Values filled into the curation script: a run's own, or the placeholders.
+function curationScriptValues(run = null) {
+    if (!run) {
+        return {
+            jobLabel: CURATION_PLACEHOLDERS.jobId,
+            capsulePath: CURATION_PLACEHOLDERS.capsulePath,
+            analyzers: [{ name: CURATION_PLACEHOLDERS.recording, url: dandiZarrS3Url(CURATION_PLACEHOLDERS.zarrId) }],
+        };
+    }
+    return { jobLabel: runJobLabel(run), capsulePath: run.path, analyzers: runPostprocessedAnalyzers(run) };
+}
+
+// Python script that opens one of a job's analyzers in the SpikeInterface
 // GUI with the curation panel on. The DANDI copy is read-only, so the GUI's
 // "Save curation" button writes (and a re-run resumes from) a local JSON file
 // in the spikeinterface curation format. JSON string literals are valid
 // Python string literals, so JSON.stringify quotes every interpolated value.
-function curationScript(run, analyzers, recording = null) {
-    const jobLabel = runJobLabel(run);
+function curationScript({ jobLabel, capsulePath, analyzers }) {
     const py = (value) => JSON.stringify(String(value));
     const analyzerLines = analyzers.map((a) => `    ${py(a.name)}: ${py(a.url)},`).join("\n");
-    const chosen = analyzers.some((a) => a.name === recording) ? recording : analyzers[0].name;
     const choice =
         analyzers.length > 1
-            ? `# This job has ${analyzers.length} recordings; pick the one to curate.\nRECORDING = ${py(chosen)}`
-            : `RECORDING = ${py(chosen)}`;
+            ? `# This job has ${analyzers.length} recordings; pick the one to curate.\nRECORDING = ${py(analyzers[0].name)}`
+            : `RECORDING = ${py(analyzers[0].name)}`;
     return `# Curate ${jobLabel} with SpikeInterface GUI, streaming its postprocessed
 # SortingAnalyzer from the DANDI Archive (nothing is downloaded up front).
 #
 #   ${SPIKEINTERFACE_GUI_INSTALL}
 #
-# Job capsule: ${run.path}
+# Job capsule: ${capsulePath}
 import json
 from pathlib import Path
 
@@ -2850,11 +2869,17 @@ run_mainwindow(
 `;
 }
 
-// Code block with a copy button (wired up by initCopyCodeButtons).
-function renderCopyableCode(code, language = "python") {
+// Code block with a copy button (wired up by initCopyCodeButtons). Each of
+// *placeholders* is highlighted in the rendered code; the copied text is the
+// plain code.
+function renderCopyableCode(code, placeholders = []) {
+    let html = e(code);
+    for (const token of placeholders) {
+        html = html.split(e(token)).join(`<mark class="code-placeholder">${e(token)}</mark>`);
+    }
     return `<div class="code-block">
-    <button type="button" class="copy-code-btn" aria-label="Copy code to clipboard">Copy</button>
-    <pre class="code-block-pre"><code class="language-${e(language)}">${e(code)}</code></pre>
+    <button type="button" class="copy-code-btn" aria-label="Copy code to clipboard" title="Copy">${COPY_ICON}</button>
+    <pre class="code-block-pre"><code class="language-python">${html}</code></pre>
 </div>`;
 }
 
@@ -2872,206 +2897,169 @@ function isCuratableRun(run) {
     return run.status === "success" && runPostprocessedAnalyzers(run).length > 0;
 }
 
-// Run-card header indicator: a link to the Curation page for curatable runs,
-// and a muted marker for successful runs whose capsule has no postprocessed
-// output (nothing to curate). Other statuses show nothing.
+// Run-card header indicator: a link opening the Curation page (in a new tab)
+// with the script filled in for this run, and a muted marker for successful
+// runs whose capsule has no postprocessed output (nothing to curate). Other
+// statuses show nothing.
 function renderCurationLink(run) {
     if (run.status !== "success") return "";
     if (!isCuratableRun(run)) {
         return `<span class="run-entry-curate-link run-entry-curate-missing" title="This job capsule has no derivatives/postprocessed output, so there is nothing to curate">✎ Not curatable</span>`;
     }
-    return `<a class="run-entry-curate-link" href="${e(curationPageUrl(run))}" title="Curate this run's sorting with SpikeInterface GUI">✎ Curate</a>`;
+    return `<a class="run-entry-curate-link" href="${e(curationPageUrl(run))}" target="_blank" rel="noopener" title="Open a SpikeInterface GUI curation script for this run in a new tab">✎ Curate</a>`;
 }
 
 /* ─── Curation page (?view=curation) ─────────────────────────── */
-let _curationRuns = [];
+const CURATION_SETUP_OPEN_KEY = "curationSetupOpen";
 
-// Jobs that can be curated: those with output and at least one postprocessed
-// analyzer, ordered by Dandiset, then asset path, newest first.
-function curationCandidates(runs) {
-    return runs
-        .filter((run) => run.hasOutput && runPostprocessedAnalyzers(run).length > 0)
-        .sort(
-            (a, b) =>
-                String(a.dandisetId).localeCompare(String(b.dandisetId)) ||
-                String(a.dandiPath ?? "").localeCompare(String(b.dandiPath ?? "")) ||
-                String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? ""))
-        );
-}
-
-// Accepts a job ID, a capsule path (or any path inside the capsule), or a
-// DANDI file-browser URL (…/files?location=<capsule path>) as shown by the
-// run cards' "Derivatives" link.
-function normalizeCurationQuery(query) {
-    let q = String(query ?? "").trim();
-    const location = q.match(/[?&]location=([^&#]+)/);
-    if (location) {
-        try {
-            q = decodeURIComponent(location[1]);
-        } catch {
-            q = location[1];
-        }
+// Whether the setup-instructions card starts expanded: open unless this
+// viewer collapsed it last time (a per-browser convenience only).
+function curationSetupOpen() {
+    try {
+        return localStorage.getItem(CURATION_SETUP_OPEN_KEY) !== "0";
+    } catch {
+        return true;
     }
-    // Trim leading/trailing slashes with index scans (a /\/+$/ regex backtracks
-    // polynomially on long runs of "/").
-    let start = 0;
-    let end = q.length;
-    while (start < end && q.charCodeAt(start) === 47 /* "/" */) start++;
-    while (end > start && q.charCodeAt(end - 1) === 47) end--;
-    return q.slice(start, end);
 }
 
-function findCurationRun(runs, query) {
-    const q = normalizeCurationQuery(query);
-    if (!q) return null;
-    return (
-        runs.find((run) => run.jobId === q || run.path === q) ??
-        runs.find((run) => run.path && q.startsWith(`${run.path}/`)) ??
-        null
-    );
+function rememberCurationSetupOpen(open) {
+    try {
+        localStorage.setItem(CURATION_SETUP_OPEN_KEY, open ? "1" : "0");
+    } catch {
+        /* storage unavailable; the card just starts open next time */
+    }
 }
 
-function renderCurationJobDetails(run, analyzers, recording) {
-    const recordingHtml =
-        analyzers.length > 1
-            ? `<label class="curation-field">
-            <span class="curation-field-label">Recording</span>
-            <select id="curation-recording" class="curation-select">${analyzers
-                .map(
-                    (a) =>
-                        `<option value="${e(a.name)}"${a.name === recording ? " selected" : ""}>${e(a.name)}</option>`
-                )
-                .join("")}</select>
-        </label>`
-            : `<div class="curation-field">
-            <span class="curation-field-label">Recording</span>
-            <code class="curation-value">${e(analyzers[0].name)}</code>
-        </div>`;
-    const dandisetUrl = `${dandiBaseUrl(run.dandisetId)}/dandiset/${encodeURIComponent(run.dandisetId)}`;
-    return `<dl class="curation-job-meta">
-        <div><dt>Job</dt><dd><code class="curation-value">${e(runJobLabel(run))}</code></dd></div>
-        <div><dt>Dandiset</dt><dd><a href="${e(dandisetUrl)}" target="_blank" rel="noopener">${e(run.dandisetId)}</a></dd></div>
-        ${run.dandiPath ? `<div><dt>Asset</dt><dd>${e(run.dandiPath)}</dd></div>` : ""}
-        <div><dt>Capsule</dt><dd><a href="${e(derivativesUrl(run.path))}" target="_blank" rel="noopener">↗ Derivatives${DANDI_ICON_HTML}</a></dd></div>
-    </dl>
-    ${recordingHtml}`;
+function findCurationRun(runs, key) {
+    if (!key) return null;
+    return runs.find((run) => run.jobId === key || run.path === key) ?? null;
 }
 
-function renderCurationPage(runs, query = "") {
-    const options = runs
-        .map(
-            (run) =>
-                `<option value="${e(runCurationKey(run))}">${e(`Dandiset ${run.dandisetId} · ${run.dandiPath ?? run.path}`)}</option>`
-        )
-        .join("");
-    return `<div class="curation-page">
-    <section class="curation-panel">
-        <label class="curation-field" for="curation-job-input">
-            <span class="curation-field-label">Job</span>
-            <input id="curation-job-input" class="curation-input" type="text" list="curation-job-options"
-                value="${e(query)}" autocomplete="off" spellcheck="false"
-                placeholder="Job ID, job capsule path, or DANDI link to the capsule">
-        </label>
-        <datalist id="curation-job-options">${options}</datalist>
-        <p class="curation-hint">${runs.length} successful job${runs.length === 1 ? "" : "s"} with postprocessed output. Start typing to search, or open a run on the <a href="?view=dashboard">dashboard</a> and click <strong>✎ Curate</strong>.</p>
-        <div id="curation-job-details"></div>
-    </section>
-    <section class="curation-script">
-        <div class="params-output-header">
-            <span class="params-output-title">Generated script</span>
-        </div>
-        <div id="curation-script-body"></div>
-    </section>
-    <div class="params-instructions">
-        <div class="params-instructions-title">How to curate a run</div>
-        <div class="params-instructions-step">
+// The Curation page: without a run, the script with placeholders and how to
+// find each value; with one (opened from a run card's ✎ Curate), the script
+// filled in for that job. *notice* explains why a requested job fell back to
+// placeholders.
+function renderCurationPage(run = null, notice = "") {
+    const P = CURATION_PLACEHOLDERS;
+    const values = curationScriptValues(run);
+    const code = (text) => `<code>${e(text)}</code>`;
+    const dandisetUrl = run ? `${dandiBaseUrl(run.dandisetId)}/dandiset/${encodeURIComponent(run.dandisetId)}` : "";
+    const filledHtml = run
+        ? `<div class="curation-filled">
+        Filled in for ${code(values.jobLabel)}
+        <span class="run-sep">·</span>
+        <a href="${e(dandisetUrl)}" target="_blank" rel="noopener">Dandiset ${e(run.dandisetId)}</a>
+        ${run.dandiPath ? `<span class="run-sep">·</span><span class="curation-filled-asset">${e(run.dandiPath)}</span>` : ""}
+        <span class="run-sep">·</span>
+        <a href="${e(derivativesUrl(run.path))}" target="_blank" rel="noopener">↗ Derivatives${DANDI_ICON_HTML}</a>
+    </div>`
+        : "";
+    const noticeHtml = notice ? `<p class="curation-notice">${notice}</p>` : "";
+    const placeholders = run ? [] : Object.values(P);
+
+    const findSteps = run
+        ? `<div class="params-instructions-step">
             <span class="params-instructions-num">1</span>
-            <span>Choose a job above. The script is filled in with its postprocessed <code>SortingAnalyzer</code> Zarr assets, which are streamed from the DANDI Archive's public S3 bucket instead of being downloaded.</span>
+            <span>The script below is filled in with this job's postprocessed <code>SortingAnalyzer</code> Zarr asset${values.analyzers.length === 1 ? "" : "s"}, streamed from the DANDI Archive's public S3 bucket instead of being downloaded.${values.analyzers.length > 1 ? " Set <code>RECORDING</code> to the recording you want to curate." : ""}</span>
+        </div>`
+        : `<div class="params-instructions-step">
+            <span class="params-instructions-num">1</span>
+            <span>Find the run's job capsule in <a href="${e(derivativesUrl("derivatives"))}" target="_blank" rel="noopener">Dandiset ${e(DERIVATIVES_DANDISET_ID)}'s derivatives</a> (a run card's <strong>↗ Derivatives</strong> button opens it). ${code(P.jobId)} is the capsule's folder name (<code>job-…</code>) and ${code(P.capsulePath)} its full path; both only label the script and name the curation file.</span>
         </div>
         <div class="params-instructions-step">
             <span class="params-instructions-num">2</span>
+            <span>Open the capsule's <code>derivatives/postprocessed/</code> folder: each <code>${e(P.recording)}.zarr</code> asset is one recording's <code>SortingAnalyzer</code>. Its ${code(P.zarrId)} is in the asset's metadata, whose <code>contentUrl</code> includes <code>https://dandiarchive.s3.amazonaws.com/zarr/${e(P.zarrId)}/</code>. It is also the asset's <code>content_id</code> in the Dandiset's <code>derivatives/paths.tsv</code>. Add one <code>ANALYZERS</code> entry per recording and set <code>RECORDING</code> to the one to curate.</span>
+        </div>`;
+    const offset = run ? 1 : 2;
+
+    return `<div class="curation-page">
+    ${noticeHtml}
+    ${filledHtml}
+    ${
+        run
+            ? ""
+            : `<p class="curation-tip">Tip: click <strong>✎ Curate</strong> on a successful run in the <a href="?view=dashboard">dashboard</a> to open this script with every value filled in for that job.</p>`
+    }
+    <details class="params-instructions curation-setup"${curationSetupOpen() ? " open" : ""}>
+        <summary class="params-instructions-title curation-setup-title">Setup instructions</summary>
+        ${findSteps}
+        <div class="params-instructions-step">
+            <span class="params-instructions-num">${offset + 1}</span>
             <span>Install <a href="${e(SPIKEINTERFACE_GUI_URL)}" target="_blank" rel="noopener">SpikeInterface GUI</a> with S3 support: <code>${e(SPIKEINTERFACE_GUI_INSTALL)}</code>.</span>
         </div>
         <div class="params-instructions-step">
-            <span class="params-instructions-num">3</span>
-            <span>Click <strong>Copy</strong>, save the script (e.g.&nbsp;<code>curate.py</code>) and run it with Python. Loading the analyzer's extensions takes a minute or two over the network.</span>
+            <span class="params-instructions-num">${offset + 2}</span>
+            <span>Click the copy button on the script, save it (e.g.&nbsp;<code>curate.py</code>) and run it with Python. Loading the analyzer's extensions takes a minute or two over the network.</span>
         </div>
         <div class="params-instructions-step">
-            <span class="params-instructions-num">4</span>
+            <span class="params-instructions-num">${offset + 3}</span>
             <span>Label, merge, split or remove units in the curation panel, then click <strong>Save curation</strong>. The archive copy is read-only, so the curation is saved to a local JSON file in the SpikeInterface curation format; re-running the script resumes from it. The traces view is disabled because the postprocessed output does not include the recording.</span>
         </div>
-    </div>
+    </details>
+    <section class="curation-script">
+        <div class="params-output-header">
+            <span class="params-output-title">${run ? "Curation script" : "Curation script template"}</span>
+        </div>
+        ${renderCopyableCode(curationScript(values), placeholders)}
+    </section>
 </div>`;
 }
 
-// Re-render the job details and script for the current input (and, when the
-// job changed, keep ?job= in sync so the page can be linked/reloaded).
-function updateCurationSelection({ syncUrl = true } = {}) {
-    const input = document.getElementById("curation-job-input");
-    const details = document.getElementById("curation-job-details");
-    const body = document.getElementById("curation-script-body");
-    if (!input || !details || !body) return;
-    const run = findCurationRun(_curationRuns, input.value);
-    if (!run) {
-        details.innerHTML = input.value.trim()
-            ? `<p class="curation-empty">No successful job with postprocessed output matches <code>${e(input.value.trim())}</code>.</p>`
-            : "";
-        body.innerHTML = `<p class="curation-empty curation-script-empty">Choose a job to generate its curation script.</p>`;
-        details.dataset.jobKey = "";
-        return;
-    }
-    const analyzers = runPostprocessedAnalyzers(run);
-    const key = runCurationKey(run);
-    const recordingSelect = document.getElementById("curation-recording");
-    const recording = details.dataset.jobKey === key && recordingSelect ? recordingSelect.value : analyzers[0].name;
-    if (details.dataset.jobKey !== key) {
-        details.innerHTML = renderCurationJobDetails(run, analyzers, recording);
-        details.dataset.jobKey = key;
-    }
-    body.innerHTML = renderCopyableCode(curationScript(run, analyzers, recording));
-    if (syncUrl) {
-        const params = new URLSearchParams(window.location.search);
-        if (params.get("job") !== key) {
-            params.set("job", key);
-            window.history.replaceState(null, "", `?${params.toString()}`);
+// ?job=<id> (from a run card's ✎ Curate) fills the script in for that job;
+// without it, or when the job can't be resolved, the page shows placeholders.
+async function initCurationPage() {
+    const jobKey = new URLSearchParams(window.location.search).get("job");
+    let run = null;
+    let notice = "";
+    if (jobKey) {
+        try {
+            run = findCurationRun(parseQueueEntries(await fetchQueueState()), jobKey);
+            if (!run) {
+                notice = `Job <code>${e(jobKey)}</code> was not found in the queue, so the script below shows placeholders.`;
+            } else if (runPostprocessedAnalyzers(run).length === 0) {
+                notice = `Job <code>${e(jobKey)}</code> has no <code>derivatives/postprocessed/</code> output to curate, so the script below shows placeholders.`;
+                run = null;
+            }
+        } catch (err) {
+            notice = `Could not load job <code>${e(jobKey)}</code> (${e(err.message || "unknown error")}), so the script below shows placeholders.`;
         }
     }
-}
-
-async function initCurationPage() {
-    const entries = await fetchQueueState();
-    _curationRuns = curationCandidates(parseQueueEntries(entries));
-    const query = new URLSearchParams(window.location.search).get("job") ?? "";
-    document.getElementById("runs").innerHTML = renderCurationPage(_curationRuns, query);
+    document.getElementById("runs").innerHTML = renderCurationPage(run, notice);
     showDiffResults();
-    const root = document.querySelector(".curation-page");
-    root.addEventListener("input", (evt) => {
-        if (evt.target.id === "curation-job-input") updateCurationSelection();
-    });
-    root.addEventListener("change", (evt) => {
-        if (evt.target.id === "curation-recording") updateCurationSelection();
-    });
-    updateCurationSelection({ syncUrl: false });
+    document
+        .querySelector(".curation-setup")
+        ?.addEventListener("toggle", (evt) => rememberCurationSetupOpen(evt.currentTarget.open));
 }
 
-// Clipboard handler for every .copy-code-btn on the page (run cards render
-// lazily and re-render in place, so this is one delegated listener).
+const COPY_ICON = `<svg class="copy-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><rect x="5.5" y="5.5" width="8" height="9" rx="1.5" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M10.5 3.5V3A1.5 1.5 0 0 0 9 1.5H4A1.5 1.5 0 0 0 2.5 3v7A1.5 1.5 0 0 0 4 11.5h.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>`;
+const COPIED_ICON = `<svg class="copy-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+const COPY_FAILED_ICON = `<svg class="copy-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>`;
+
+// Clipboard handler for every .copy-code-btn on the page (one delegated
+// listener, so code blocks rendered later need no wiring). The icon briefly
+// turns into a check (or a cross on failure) and the title says which.
 function initCopyCodeButtons() {
     document.addEventListener("click", (evt) => {
         const btn = evt.target.closest?.(".copy-code-btn");
         if (!btn) return;
         const code = btn.closest(".code-block")?.querySelector("code")?.textContent ?? "";
-        const done = (label) => {
-            btn.textContent = label;
-            setTimeout(() => (btn.textContent = "Copy"), 1500);
+        const done = (state) => {
+            btn.dataset.state = state;
+            btn.innerHTML = state === "copied" ? COPIED_ICON : COPY_FAILED_ICON;
+            btn.title = state === "copied" ? "Copied!" : "Copy failed";
+            setTimeout(() => {
+                delete btn.dataset.state;
+                btn.innerHTML = COPY_ICON;
+                btn.title = "Copy";
+            }, 1500);
         };
         if (!navigator.clipboard?.writeText) {
-            done("Copy failed");
+            done("failed");
             return;
         }
         navigator.clipboard.writeText(code).then(
-            () => done("Copied!"),
-            () => done("Copy failed")
+            () => done("copied"),
+            () => done("failed")
         );
     });
 }
@@ -6026,7 +6014,7 @@ async function init() {
     if (_viewMode === "curation") {
         setPageCopy(
             "Curate Sorting Results",
-            'Generate a script that opens a successful run\'s postprocessed spike sorting in <a href="https://github.com/SpikeInterface/spikeinterface-gui" target="_blank" rel="noopener">SpikeInterface GUI</a>, streamed directly from the DANDI Archive.'
+            'Open a successful run\'s postprocessed spike sorting in <a href="https://github.com/SpikeInterface/spikeinterface-gui" target="_blank" rel="noopener">SpikeInterface GUI</a>, streamed directly from the DANDI Archive.'
         );
     }
     if (_viewMode === "archive") {
@@ -6134,9 +6122,9 @@ if (typeof module !== "undefined" && module.exports) {
         initModal,
         initCopyCodeButtons,
         curationScript,
-        curationCandidates,
         findCurationRun,
         initCurationPage,
+        curationScriptValues,
         renderCurationLink,
         renderGroupBadges,
         renderCurationPage,
