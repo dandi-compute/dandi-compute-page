@@ -33,4 +33,6 @@ jobs:
               with:
                   token: ${{ secrets.CODECOV_TOKEN }}
                   files: ./coverage/lcov.info
-                  fail_ci_if_error: true
+                  # Dependabot and fork PRs don't receive CODECOV_TOKEN, and Codecov rejects
+                  # tokenless uploads, so only fail hard when the token is available
+                  fail_ci_if_error: ${{ secrets.CODECOV_TOKEN != '' }}
