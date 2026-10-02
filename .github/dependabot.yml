@@ -1,10 +1,11 @@
 version: 2
 updates:
-  - package-ecosystem: "github-actions"
-    directory: "/"
-    schedule:
-      interval: "quarterly"
-    reviewers:
-      - "CodyCBakerPhD"
-    assignees:
-      - "CodyCBakerPhD"
+    - package-ecosystem: "github-actions"
+      directory: "/"
+      schedule:
+          interval: "quarterly"
+      rebase-strategy: "disabled"
+      reviewers:
+          - "CodyCBakerPhD"
+      assignees:
+          - "CodyCBakerPhD"
