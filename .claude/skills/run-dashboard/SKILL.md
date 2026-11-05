@@ -27,13 +27,20 @@ open it in Chromium, and stub the external endpoints at the network boundary.
       (one row per asset path of a capsule: `job_id`, `path`, `content_id`). Neither is
       referenced by a known content-id, so `fetchQueueState` looks both up here first, then
       fetches each `contentUrl` blob (a `.../blobs/<3>/<3>/<id>` URL). Stub both hops: the
-      manifest response is `[{"path": "derivatives/jobs.tsv", "contentUrl": [..., "<blob
-url>"]}, {"path": "derivatives/paths.tsv", ...}]`, and each blob URL serves its table,
+      manifest response is
+      `[{"path": "derivatives/jobs.tsv", "contentUrl": [..., "<blob url>"]}, {"path": "derivatives/paths.tsv", ...}]`,
+      and each blob URL serves its table,
       plain tab-separated with a header. `jobs.tsv` columns match `_JOBS_TSV_FIELD_NAMES`
       and `paths.tsv` columns `_PATHS_TSV_FIELD_NAMES` in dandi-compute/dandi-compute-core
       (`dandi_compute_code.queue`). `joinJobsAndPaths` turns them into queue entries.
     - `https://dandiarchive.s3.amazonaws.com/dandisets/001873/draft/assets.jsonld` — same
       two-hop lookup, archive Dandiset (archive view).
+    - `https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads/...` —
+      the live squeue terminal atop `?view=dashboard` (polled every minute). It reads
+      `monitor/<today, US Eastern>/monitor/LATEST`, falling back on a 404 to
+      `monitor/latest/LATEST` (the newest day branch's name) and that branch's `monitor/LATEST`,
+      then `monitor/<record>/{stdout,stderr,exit_status}`. Unstubbed, it 404s into a
+      "no snapshots" terminal without affecting the rest of the page.
     - `.../code/main/src/dandi_compute_code/queue/pipeline_configs.json` — priorities banner.
     - `.../code/main/...registered_params.json` / `registered_configs.json` — registries.
     - `https://dandiarchive.s3.amazonaws.com/blobs/<3>/<3>/<id>` — per-run artifacts
