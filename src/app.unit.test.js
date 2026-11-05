@@ -4325,6 +4325,25 @@ describe("live squeue monitor", () => {
         expect([...states].map((el) => [el.textContent, el.hasAttribute("title")])).toEqual([["BF 1", false]]);
     });
 
+    it("trims blank lines around the output in linear time", () => {
+        const root = document.createElement("div");
+        const snapshot = {
+            branch: "b",
+            sourceUrl: "u",
+            // The quadratic regex trim this replaced took ~48 s here (newlines run after text).
+            stdout: `\n\n${SQUEUE_HEADER}\n${"\n".repeat(200000)}x\n\n`,
+            stderr: `${"\n".repeat(200000)}boom`,
+            exitStatus: "1",
+            takenAt: NOW.getTime(),
+        };
+        const started = performance.now();
+        root.innerHTML = renderSqueueMonitor({ snapshot }, NOW.getTime());
+        expect(performance.now() - started).toBeLessThan(2000);
+        const screen = root.querySelector(".squeue-screen").textContent;
+        expect(screen.startsWith(`$ squeue --me\n${SQUEUE_HEADER.trimEnd()}\n`)).toBe(true);
+        expect(screen.endsWith("x\nboom\n[exit status 1]\n")).toBe(true);
+    });
+
     it("renders the connecting, missing and unavailable states", () => {
         const statusOf = (state) => {
             const root = document.createElement("div");
