@@ -2185,13 +2185,16 @@ function formatSnapshotAge(ms) {
     return `${Math.floor(hours / 24)} days ago`;
 }
 
-// Terminal text: squeue pads every column, so trailing spaces are dropped.
+// Terminal text: squeue pads every column, so trailing spaces are dropped, as
+// are blank lines before and after. Scanned rather than matched by a regex,
+// which would be quadratic on a long run of newlines.
 function squeueScreenText(text) {
-    return text
-        .split("\n")
-        .map((line) => line.trimEnd())
-        .join("\n")
-        .replace(/^\n+|\n+$/g, "");
+    const lines = text.split("\n").map((line) => line.trimEnd());
+    let start = 0;
+    let end = lines.length;
+    while (start < end && lines[start] === "") start++;
+    while (end > start && lines[end - 1] === "") end--;
+    return lines.slice(start, end).join("\n");
 }
 
 function renderSqueueStatus(kind, label) {
