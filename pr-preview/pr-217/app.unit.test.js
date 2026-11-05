@@ -4084,8 +4084,17 @@ describe("live squeue monitor", () => {
     ].join("\n");
 
     // Serve `files` (branch → path → text) for the global logs repository; anything else is a 404.
-    function serveGlobalLogs(files) {
+    // `branches`, when given, is what the GitHub API lists as the repository's monitor* branches.
+    const BRANCHES_API =
+        "https://api.github.com/repos/dandi-compute/dandi-compute-global-logs/git/matching-refs/heads/monitor";
+    function serveGlobalLogs(files, branches = undefined) {
         return vi.fn(async (url) => {
+            if (url === BRANCHES_API) {
+                if (branches instanceof Error) throw branches;
+                if (branches === undefined) return new Response("{}", { status: 404 });
+                const refs = branches.map((name) => ({ ref: `refs/heads/${name}`, object: { sha: "0".repeat(40) } }));
+                return new Response(JSON.stringify(refs), { status: 200 });
+            }
             for (const [branch, paths] of Object.entries(files)) {
                 const prefix = `${RAW}/${branch}/`;
                 if (!url.startsWith(prefix)) continue;
@@ -4199,13 +4208,65 @@ describe("live squeue monitor", () => {
         ]);
     });
 
-    it("resolves to null when neither today's branch nor a valid pointer leads to a snapshot", async () => {
-        global.fetch = serveGlobalLogs({});
-        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
+    it("falls back to the newest day branch GitHub lists when there is no usable pointer", async () => {
+        const listed = [
+            "monitor/2026-09-28",
+            "monitor/latest",
+            "monitor/2026-11-02",
+            "monitor-notes",
+            "monitor/2026-10-31",
+        ];
+        const files = { "monitor/2026-11-02": snapshotFiles("06/20261102T065502-squeue") };
 
-        global.fetch = serveGlobalLogs({ "monitor/latest": { LATEST: "../../main\n" } });
+        // No pointer at all.
+        global.fetch = serveGlobalLogs(files, listed);
+        let snapshot = await fetchLatestSqueueSnapshot(NOW);
+        expect(snapshot.branch).toBe("monitor/2026-11-02");
+        expect(snapshot.recordName).toBe("06/20261102T065502-squeue");
+
+        // A pointer naming a day whose branch has since been deleted.
+        stopSqueueMonitor(); // forget the listing kept from the call above
+        global.fetch = serveGlobalLogs({ ...files, "monitor/latest": { LATEST: "monitor/2026-11-01\n" } }, listed);
+        snapshot = await fetchLatestSqueueSnapshot(NOW);
+        expect(snapshot.branch).toBe("monitor/2026-11-02");
+        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 5)).toEqual([
+            `${RAW}/monitor/2026-11-05/monitor/LATEST`,
+            `${RAW}/monitor/latest/LATEST`,
+            `${RAW}/monitor/2026-11-01/monitor/LATEST`,
+            BRANCHES_API,
+            `${RAW}/monitor/2026-11-02/monitor/LATEST`,
+        ]);
+    });
+
+    it("lists branches at most every 10 minutes and resolves to null when nothing leads to a snapshot", async () => {
+        const apiCalls = () => global.fetch.mock.calls.filter(([url]) => url === BRANCHES_API).length;
+
+        global.fetch = serveGlobalLogs({}, []);
         expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
-        expect(global.fetch).toHaveBeenCalledTimes(2);
+        expect(apiCalls()).toBe(1);
+        // Polls within 10 minutes reuse the listing.
+        expect(await fetchLatestSqueueSnapshot(new Date(NOW.getTime() + 9 * 60 * 1000))).toBeNull();
+        expect(apiCalls()).toBe(1);
+        expect(await fetchLatestSqueueSnapshot(new Date(NOW.getTime() + 11 * 60 * 1000))).toBeNull();
+        expect(apiCalls()).toBe(2);
+
+        // A malformed pointer, an unreachable API, or a listed branch that turns out to be gone.
+        stopSqueueMonitor();
+        global.fetch = serveGlobalLogs(
+            { "monitor/latest": { LATEST: "../../main\n" } },
+            new TypeError("Failed to fetch")
+        );
+        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
+        stopSqueueMonitor();
+        global.fetch = serveGlobalLogs({}, ["monitor/2026-11-04"]);
+        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
+        // The pointer and the listing naming the same missing day are tried once.
+        stopSqueueMonitor();
+        global.fetch = serveGlobalLogs({ "monitor/latest": { LATEST: "monitor/2026-11-04\n" } }, [
+            "monitor/2026-11-04",
+        ]);
+        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
+        expect(global.fetch.mock.calls.filter(([url]) => url.includes("2026-11-04/monitor/LATEST"))).toHaveLength(1);
     });
 
     it("tolerates a missing stderr or exit status but not an unreachable repository", async () => {

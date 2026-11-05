@@ -2040,12 +2040,18 @@ async function initQueuePriorities() {
    cluster's clock (US Eastern). When today has no branch -- just after midnight,
    or for as long as the monitor is down -- the persistent `monitor/latest`
    branch, whose LATEST file names the newest day branch, still leads to the
-   last snapshot without listing branches. Everything is read from the raw CDN
-   (max-age=300), so a new snapshot shows within ~5 minutes and the polls in
-   between are browser-cache hits. */
+   last snapshot without listing branches. Should that pointer be missing or
+   lead nowhere, the newest day branch is found by listing the monitor/
+   branches through the GitHub API instead (at most every 10 minutes). Files are
+   read from the raw CDN (max-age=300), so a new snapshot shows within ~5
+   minutes and the polls in between are browser-cache hits. */
 const GLOBAL_LOGS_REPO_URL = "https://github.com/dandi-compute/dandi-compute-global-logs";
 const GLOBAL_LOGS_RAW_BASE = "https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads";
 const MONITOR_POINTER_BRANCH = "monitor/latest";
+// Every branch whose name starts with "monitor" (the API matches by prefix).
+const MONITOR_BRANCHES_URL =
+    "https://api.github.com/repos/dandi-compute/dandi-compute-global-logs/git/matching-refs/heads/monitor";
+const MONITOR_BRANCHES_TTL_MS = 10 * 60 * 1000;
 const MONITOR_TIME_ZONE = "America/New_York";
 const MONITOR_DAY_BRANCH_PATTERN = /^monitor\/\d{4}-\d{2}-\d{2}$/;
 const SQUEUE_RECORD_PATTERN = /^\d{2}\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})-[\w.-]+$/;
@@ -2124,16 +2130,51 @@ async function fetchGlobalLogsText(branch, path) {
     return resp.text();
 }
 
+// The day branch monitor/latest names, or null when it names none.
+async function pointedMonitorBranch() {
+    const pointed = (await fetchGlobalLogsText(MONITOR_POINTER_BRANCH, "LATEST"))?.trim();
+    return pointed && MONITOR_DAY_BRANCH_PATTERN.test(pointed) ? pointed : null;
+}
+
+// The newest monitor day branch on GitHub, by listing them; null when there is
+// none or the API cannot be reached. The answer is kept for 10 minutes so that
+// polling never spends the API's hourly allowance, and the request itself is
+// ETag-revalidated (a 304 does not count against it).
+let _newestMonitorBranch = null; // { branch, at }
+async function newestMonitorBranch(now = Date.now()) {
+    if (_newestMonitorBranch && now - _newestMonitorBranch.at < MONITOR_BRANCHES_TTL_MS) {
+        return _newestMonitorBranch.branch;
+    }
+    let branch = null;
+    try {
+        const resp = await cachedFetch(MONITOR_BRANCHES_URL);
+        const refs = resp.ok ? await resp.json() : [];
+        const days = (Array.isArray(refs) ? refs : [])
+            .map((ref) => String(ref?.ref ?? "").replace("refs/heads/", ""))
+            .filter((name) => MONITOR_DAY_BRANCH_PATTERN.test(name))
+            .sort();
+        branch = days.length > 0 ? days[days.length - 1] : null;
+    } catch {
+        /* offline, rate-limited or malformed: no branch */
+    }
+    _newestMonitorBranch = { branch, at: now };
+    return branch;
+}
+
 // The newest squeue snapshot: from today's day branch when there is one, else
-// from the day branch monitor/latest names. Null when neither leads to one.
+// from the day branch monitor/latest names, else from the newest day branch
+// GitHub lists. Null when none of them leads to one.
 async function fetchLatestSqueueSnapshot(now = new Date()) {
     let branch = monitorDayBranch(now);
     let recordName = await fetchGlobalLogsText(branch, "monitor/LATEST");
-    if (recordName === null) {
-        const pointed = (await fetchGlobalLogsText(MONITOR_POINTER_BRANCH, "LATEST"))?.trim();
-        if (!pointed || !MONITOR_DAY_BRANCH_PATTERN.test(pointed)) return null;
-        branch = pointed;
-        recordName = await fetchGlobalLogsText(branch, "monitor/LATEST");
+    const tried = new Set([branch]);
+    for (const findBranch of [pointedMonitorBranch, () => newestMonitorBranch(now.getTime())]) {
+        if (recordName !== null) break;
+        const found = await findBranch();
+        if (!found || tried.has(found)) continue;
+        tried.add(found);
+        const foundRecord = await fetchGlobalLogsText(found, "monitor/LATEST");
+        if (foundRecord !== null) [branch, recordName] = [found, foundRecord];
     }
     recordName = recordName?.trim();
     if (!recordName || !SQUEUE_RECORD_PATTERN.test(recordName)) return null;
@@ -2409,6 +2450,7 @@ function stopSqueueMonitor() {
     _squeueMonitorTimer = null;
     document.removeEventListener("visibilitychange", onSqueueMonitorVisibilityChange);
     _squeueMonitorState = { snapshot: undefined, error: null };
+    _newestMonitorBranch = null;
 }
 
 /* Log files rendered as always-open inline iframes (not modal buttons) */
