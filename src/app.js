@@ -2031,6 +2031,315 @@ async function initQueuePriorities() {
     el.style.display = "";
 }
 
+/* ─── Live squeue monitor (top of the dashboard) ────────────── */
+/* The runner snapshots the cluster queue (`squeue --me`) every 5 minutes into
+   dandi-compute/dandi-compute-global-logs (launcher/record.sh in
+   dandi-compute-runner). Each snapshot lands on that day's `monitor/YYYY-MM-DD`
+   branch under monitor/{HH}/{YYYYMMDDTHHMMSS}-squeue/, and monitor/LATEST on the
+   branch names the newest one. Day branches and snapshot names follow the
+   cluster's clock (US Eastern). When today has no branch -- just after midnight,
+   or for as long as the monitor is down -- the persistent `monitor/latest`
+   branch, whose LATEST file names the newest day branch, still leads to the
+   last snapshot without listing branches. Everything is read from the raw CDN
+   (max-age=300), so a new snapshot shows within ~5 minutes and the polls in
+   between are browser-cache hits. */
+const GLOBAL_LOGS_REPO_URL = "https://github.com/dandi-compute/dandi-compute-global-logs";
+const GLOBAL_LOGS_RAW_BASE = "https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads";
+const MONITOR_POINTER_BRANCH = "monitor/latest";
+const MONITOR_TIME_ZONE = "America/New_York";
+const MONITOR_DAY_BRANCH_PATTERN = /^monitor\/\d{4}-\d{2}-\d{2}$/;
+const SQUEUE_RECORD_PATTERN = /^\d{2}\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})-[\w.-]+$/;
+const SQUEUE_COMMAND = "squeue --me";
+const SQUEUE_POLL_INTERVAL_MS = 60 * 1000;
+// Three missed 5-minute snapshots mark the view stale.
+const SQUEUE_STALE_AFTER_MS = 15 * 60 * 1000;
+// SLURM's compact job state codes, in the order the tally lists them.
+const SLURM_STATE_NAMES = {
+    R: "running",
+    PD: "pending",
+    CG: "completing",
+    CF: "configuring",
+    S: "suspended",
+    PR: "preempted",
+    RQ: "requeued",
+    F: "failed",
+    TO: "timeout",
+    OOM: "out of memory",
+    NF: "node fail",
+    CA: "cancelled",
+    CD: "completed",
+};
+
+function globalLogsRawUrl(branch, path) {
+    return `${GLOBAL_LOGS_RAW_BASE}/${branch}/${path}`;
+}
+
+// Wall-clock fields of `date` in `timeZone`, as numbers.
+function zonedDateParts(date, timeZone) {
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone,
+        hourCycle: "h23",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+    }).formatToParts(date);
+    const fields = {};
+    for (const { type, value } of parts) if (type !== "literal") fields[type] = Number(value);
+    return fields;
+}
+
+// Epoch milliseconds of a wall-clock time in `timeZone`. The zone's offset is
+// read again at the first guess, which settles the guess across DST changes.
+function zonedWallTimeToEpoch({ year, month, day, hour, minute, second }, timeZone) {
+    const asUtc = Date.UTC(year, month - 1, day, hour, minute, second);
+    const offsetAt = (epoch) => {
+        const p = zonedDateParts(new Date(epoch), timeZone);
+        return Date.UTC(p.year, p.month - 1, p.day, p.hour, p.minute, p.second) - epoch;
+    };
+    return asUtc - offsetAt(asUtc - offsetAt(asUtc));
+}
+
+// The day branch the cluster records today's snapshots on.
+function monitorDayBranch(now = new Date()) {
+    const { year, month, day } = zonedDateParts(now, MONITOR_TIME_ZONE);
+    return `monitor/${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+// When a snapshot was taken, from its record name ("14/20261105T144502-squeue");
+// null when the name is not one.
+function squeueRecordTime(recordName) {
+    const match = SQUEUE_RECORD_PATTERN.exec(recordName ?? "");
+    if (!match) return null;
+    const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+    return zonedWallTimeToEpoch({ year, month, day, hour, minute, second }, MONITOR_TIME_ZONE);
+}
+
+// A file's text from the global logs repository, or null when it is not there.
+async function fetchGlobalLogsText(branch, path) {
+    const resp = await fetch(globalLogsRawUrl(branch, path));
+    if (resp.status === 404) return null;
+    if (!resp.ok) throw new Error(`Could not read ${branch}:${path} (HTTP ${resp.status}).`);
+    return resp.text();
+}
+
+// The newest squeue snapshot: from today's day branch when there is one, else
+// from the day branch monitor/latest names. Null when neither leads to one.
+async function fetchLatestSqueueSnapshot(now = new Date()) {
+    let branch = monitorDayBranch(now);
+    let recordName = await fetchGlobalLogsText(branch, "monitor/LATEST");
+    if (recordName === null) {
+        const pointed = (await fetchGlobalLogsText(MONITOR_POINTER_BRANCH, "LATEST"))?.trim();
+        if (!pointed || !MONITOR_DAY_BRANCH_PATTERN.test(pointed)) return null;
+        branch = pointed;
+        recordName = await fetchGlobalLogsText(branch, "monitor/LATEST");
+    }
+    recordName = recordName?.trim();
+    if (!recordName || !SQUEUE_RECORD_PATTERN.test(recordName)) return null;
+
+    const directory = `monitor/${recordName}`;
+    const [stdout, stderr, exitStatus] = await Promise.all([
+        fetchGlobalLogsText(branch, `${directory}/stdout`),
+        fetchGlobalLogsText(branch, `${directory}/stderr`).catch(() => null),
+        fetchGlobalLogsText(branch, `${directory}/exit_status`).catch(() => null),
+    ]);
+    return {
+        branch,
+        recordName,
+        takenAt: squeueRecordTime(recordName),
+        stdout: stdout ?? "",
+        stderr: stderr ?? "",
+        exitStatus: exitStatus?.trim() || null,
+        sourceUrl: `${GLOBAL_LOGS_REPO_URL}/blob/${branch}/${directory}/stdout`,
+    };
+}
+
+// Job count and per-state tally, read from the ST column of squeue's
+// fixed-width table (its first line is the header). Null without that column.
+function summarizeSqueueJobs(stdout) {
+    const lines = (stdout ?? "").split("\n").filter((line) => line.trim() !== "");
+    const header = /(^|\s)ST(?=\s|$)/.exec(lines[0] ?? "");
+    if (!header) return null;
+    const start = header.index + header[1].length;
+    const states = new Map();
+    for (const line of lines.slice(1)) {
+        const state = line.slice(start, start + 2).trim() || "?";
+        states.set(state, (states.get(state) ?? 0) + 1);
+    }
+    const order = Object.keys(SLURM_STATE_NAMES);
+    const rank = (state) => (order.includes(state) ? order.indexOf(state) : order.length);
+    return {
+        jobs: lines.length - 1,
+        states: [...states].sort(([a], [b]) => rank(a) - rank(b) || a.localeCompare(b)),
+    };
+}
+
+function formatSnapshotAge(ms) {
+    const minutes = Math.floor(ms / 60000);
+    if (!(minutes >= 1)) return "just now";
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.floor(minutes / 60);
+    if (hours < 48) return `${hours} h ago`;
+    return `${Math.floor(hours / 24)} days ago`;
+}
+
+// Terminal text: squeue pads every column, so trailing spaces are dropped.
+function squeueScreenText(text) {
+    return text
+        .split("\n")
+        .map((line) => line.trimEnd())
+        .join("\n")
+        .replace(/^\n+|\n+$/g, "");
+}
+
+function renderSqueueStatus(kind, label) {
+    return `<span class="squeue-status squeue-status-${kind}">${e(label)}</span>`;
+}
+
+function renderSqueueTally(stdout) {
+    const summary = summarizeSqueueJobs(stdout);
+    if (!summary) return "";
+    const states = summary.states
+        .map(([state, count]) => {
+            const name = SLURM_STATE_NAMES[state];
+            return `<span class="squeue-state"${name ? ` title="${e(name)}"` : ""}>${e(state)} ${count}</span>`;
+        })
+        .join("");
+    return `<span class="squeue-tally">${summary.jobs} job${summary.jobs === 1 ? "" : "s"}${states}</span>`;
+}
+
+// One snapshot's screen: squeue's header dimmed, then its rows, then whatever
+// it wrote to stderr and a non-zero exit status.
+function renderSqueueOutput(snapshot) {
+    const [header, ...rows] = squeueScreenText(snapshot.stdout).split("\n");
+    let html = header ? `<span class="squeue-head">${e(header)}</span>\n` : "";
+    if (rows.length > 0) html += `${e(rows.join("\n"))}\n`;
+    const stderr = squeueScreenText(snapshot.stderr);
+    if (stderr) html += `<span class="squeue-stderr">${e(stderr)}</span>\n`;
+    if (snapshot.exitStatus && snapshot.exitStatus !== "0") {
+        html += `<span class="squeue-stderr">[exit status ${e(snapshot.exitStatus)}]</span>\n`;
+    }
+    return html;
+}
+
+// `snapshot` is undefined until the first load ends, null when no snapshot
+// was found, else what fetchLatestSqueueSnapshot returned; `error` is the
+// message of the last failed load, if it failed.
+function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now()) {
+    let status;
+    let meta = "";
+    let body = "";
+    if (snapshot) {
+        const age = snapshot.takenAt === null ? null : now - snapshot.takenAt;
+        const stale = age === null || age > SQUEUE_STALE_AFTER_MS;
+        status = renderSqueueStatus(stale ? "stale" : "live", stale ? "stale" : "live");
+        if (age !== null) {
+            const takenAt = new Date(snapshot.takenAt);
+            const exact = takenAt.toLocaleString(undefined, {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+                hour: "numeric",
+                minute: "2-digit",
+                second: "2-digit",
+                timeZoneName: "short",
+            });
+            meta += `<time class="squeue-age" datetime="${e(takenAt.toISOString())}" title="Snapshot taken ${e(exact)}">${e(formatSnapshotAge(age))}</time>`;
+        }
+        if (error) meta += `<span class="squeue-refresh-failed" title="${e(error)}">refresh failed</span>`;
+        meta += `<a class="squeue-source" href="${e(snapshot.sourceUrl)}" target="_blank" rel="noopener">${e(snapshot.branch)} ↗</a>`;
+        body = renderSqueueOutput(snapshot);
+    } else if (error) {
+        status = renderSqueueStatus("error", "unavailable");
+        body = `<span class="squeue-stderr">${e(error)}</span>\n`;
+    } else if (snapshot === null) {
+        status = renderSqueueStatus("error", "no snapshots");
+        body = `<span class="squeue-stderr">No squeue snapshot found in dandi-compute-global-logs.</span>\n`;
+    } else {
+        status = renderSqueueStatus("connecting", "connecting");
+    }
+
+    const tally = snapshot ? renderSqueueTally(snapshot.stdout) : "";
+    return `
+<div class="squeue-bar">
+    <span class="squeue-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+    <span class="squeue-title">squeue · MIT Engaging</span>
+    ${tally}
+    <span class="squeue-bar-spacer"></span>
+    ${status}${meta}
+</div>
+<pre class="squeue-screen" tabindex="0"><span class="squeue-prompt">$</span> ${e(SQUEUE_COMMAND)}
+${body}<span class="squeue-cursor" aria-hidden="true"></span></pre>`;
+}
+
+let _squeueMonitorState = { snapshot: undefined, error: null };
+let _squeueMonitorRefresh = null; // the load in flight, so polls never overlap
+let _squeueMonitorTimer = null;
+
+// Insert the monitor at the very top of the page content (once).
+function mountSqueueMonitor() {
+    let el = document.getElementById("squeue-monitor");
+    if (el) return el;
+    const pageContent = document.querySelector(".page-content");
+    if (!pageContent) return null;
+    el = document.createElement("section");
+    el.id = "squeue-monitor";
+    el.className = "squeue-monitor";
+    el.setAttribute("aria-label", "Latest squeue snapshot from MIT Engaging");
+    pageContent.insertBefore(el, pageContent.firstChild);
+    return el;
+}
+
+// Load the newest snapshot and redraw. A failed load keeps the last snapshot
+// on screen and says the refresh failed.
+function refreshSqueueMonitor() {
+    if (_squeueMonitorRefresh) return _squeueMonitorRefresh;
+    _squeueMonitorRefresh = (async () => {
+        try {
+            _squeueMonitorState = { snapshot: await fetchLatestSqueueSnapshot(), error: null };
+        } catch (err) {
+            _squeueMonitorState = {
+                snapshot: _squeueMonitorState.snapshot,
+                error: `Could not load the latest squeue snapshot: ${err.message || err}`,
+            };
+        }
+        const el = mountSqueueMonitor();
+        if (el) el.innerHTML = renderSqueueMonitor(_squeueMonitorState);
+    })().finally(() => {
+        _squeueMonitorRefresh = null;
+    });
+    return _squeueMonitorRefresh;
+}
+
+// Show the monitor and keep it current, polling while the tab is visible and
+// catching up as soon as it is shown again.
+function initSqueueMonitor() {
+    const el = mountSqueueMonitor();
+    if (!el) return Promise.resolve();
+    el.innerHTML = renderSqueueMonitor(_squeueMonitorState);
+    if (_squeueMonitorTimer === null) {
+        _squeueMonitorTimer = setInterval(() => {
+            if (document.visibilityState !== "hidden") refreshSqueueMonitor();
+        }, SQUEUE_POLL_INTERVAL_MS);
+        document.addEventListener("visibilitychange", onSqueueMonitorVisibilityChange);
+    }
+    return refreshSqueueMonitor();
+}
+
+function onSqueueMonitorVisibilityChange() {
+    if (document.visibilityState === "visible") refreshSqueueMonitor();
+}
+
+// Stop polling and forget the last snapshot (tests).
+function stopSqueueMonitor() {
+    if (_squeueMonitorTimer !== null) clearInterval(_squeueMonitorTimer);
+    _squeueMonitorTimer = null;
+    document.removeEventListener("visibilitychange", onSqueueMonitorVisibilityChange);
+    _squeueMonitorState = { snapshot: undefined, error: null };
+}
+
 /* Log files rendered as always-open inline iframes (not modal buttons) */
 const INLINE_REPORT_FILES = new Set(["report.html", "timeline.html"]);
 const INLINE_REPORT_ORDER = ["timeline.html", "report.html"];
@@ -6212,6 +6521,8 @@ async function init() {
         }
         return;
     }
+    // The live squeue snapshot heads the dashboard, above the page title.
+    if (_viewMode === "dashboard") initSqueueMonitor();
     // Top display of current queue scheduling priorities. Irrelevant to the
     // archive page, which shows already-completed (failed) runs.
     if (_viewMode !== "archive") initQueuePriorities();
@@ -6249,6 +6560,14 @@ if (typeof module !== "undefined" && module.exports) {
         startHydration,
         updateRunCard,
         fetchArchiveState,
+        fetchLatestSqueueSnapshot,
+        initSqueueMonitor,
+        monitorDayBranch,
+        refreshSqueueMonitor,
+        renderSqueueMonitor,
+        squeueRecordTime,
+        stopSqueueMonitor,
+        summarizeSqueueJobs,
         archiveStateCacheKey,
         fetchSlurmLogs,
         fetchVisualizationData,

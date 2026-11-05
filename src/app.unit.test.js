@@ -16,6 +16,14 @@ const {
     fetchQueueState,
     isImmutableBlobUrl,
     fetchArchiveState,
+    fetchLatestSqueueSnapshot,
+    initSqueueMonitor,
+    monitorDayBranch,
+    refreshSqueueMonitor,
+    renderSqueueMonitor,
+    squeueRecordTime,
+    stopSqueueMonitor,
+    summarizeSqueueJobs,
     archiveStateCacheKey,
     fetchSlurmLogs,
     fetchVisualizationData,
@@ -4038,5 +4046,295 @@ describe("progressive hydration helpers", () => {
         expect(runHasQualityControl(withQc)).toBe(true);
         expect(runHasQualityControl(withoutQc)).toBe(false);
         expect(runHasQualityControl({ ...withQc, hasOutput: false })).toBe(false);
+    });
+});
+
+describe("live squeue monitor", () => {
+    const RAW = "https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads";
+    // One line of `squeue --me --format=%.10i %15P %40j %10u %.2t %.10M %.6D %.2C %.10m %30R`.
+    const squeueLine = (id, partition, name, user, state, time, nodes, cpus, memory, reason) =>
+        [
+            id.padStart(10),
+            partition.padEnd(15),
+            name.padEnd(40),
+            user.padEnd(10),
+            state.padStart(2),
+            time.padStart(10),
+            nodes.padStart(6),
+            cpus.padStart(2),
+            memory.padStart(10),
+            reason.padEnd(30),
+        ].join(" ");
+    const SQUEUE_HEADER = squeueLine(
+        "JOBID",
+        "PARTITION",
+        "NAME",
+        "USER",
+        "ST",
+        "TIME",
+        "NODES",
+        "CP",
+        "MIN_MEMORY",
+        "NODELIST(REASON)"
+    );
+    const SQUEUE_STDOUT = [
+        SQUEUE_HEADER,
+        squeueLine(
+            "28006829",
+            "mit_preemptable",
+            "DANDI-Compute-Submitter",
+            "cb239",
+            "R",
+            "0:52",
+            "1",
+            "1",
+            "1G",
+            "node1409"
+        ),
+        squeueLine("28006900", "mit_preemptable", "aind <ephys>", "cb239", "R", "12:01", "1", "8", "64G", "node1410"),
+        squeueLine("28006901", "mit_preemptable", "aind-ephys", "cb239", "PD", "0:00", "1", "8", "64G", "(Priority)"),
+        "",
+    ].join("\n");
+
+    // Serve `files` (branch → path → text) for the global logs repository; anything else is a 404.
+    function serveGlobalLogs(files) {
+        return vi.fn(async (url) => {
+            for (const [branch, paths] of Object.entries(files)) {
+                const prefix = `${RAW}/${branch}/`;
+                if (!url.startsWith(prefix)) continue;
+                const body = paths[url.slice(prefix.length)];
+                if (body instanceof Error) throw body;
+                if (typeof body === "number") return new Response("", { status: body });
+                if (body !== undefined) return new Response(body, { status: 200 });
+            }
+            return new Response("404: Not Found", { status: 404 });
+        });
+    }
+    const snapshotFiles = (record, extra = {}) => ({
+        "monitor/LATEST": `${record}\n`,
+        [`monitor/${record}/stdout`]: SQUEUE_STDOUT,
+        [`monitor/${record}/stderr`]: "",
+        [`monitor/${record}/exit_status`]: "0\n",
+        ...extra,
+    });
+
+    // 2026-11-05 14:48:02 EST, three minutes after the 14:45:02 snapshot.
+    const NOW = new Date("2026-11-05T19:48:02Z");
+    let originalFetch;
+
+    beforeEach(() => {
+        originalFetch = global.fetch;
+    });
+
+    afterEach(() => {
+        global.fetch = originalFetch;
+        stopSqueueMonitor();
+        vi.useRealTimers();
+        document.body.innerHTML = "";
+    });
+
+    it("names today's day branch by the cluster's US Eastern date", () => {
+        // 22:30 EST on Nov 5 is already Nov 6 in UTC.
+        expect(monitorDayBranch(new Date("2026-11-06T03:30:00Z"))).toBe("monitor/2026-11-05");
+        expect(monitorDayBranch(new Date("2026-11-06T05:00:00Z"))).toBe("monitor/2026-11-06");
+        // Daylight time: 23:00 EDT on Jun 30.
+        expect(monitorDayBranch(new Date("2026-07-01T03:00:00Z"))).toBe("monitor/2026-06-30");
+    });
+
+    it("reads a snapshot's time from its record name as US Eastern wall time", () => {
+        expect(squeueRecordTime("14/20261105T144502-squeue")).toBe(Date.parse("2026-11-05T19:45:02Z"));
+        expect(squeueRecordTime("06/20260701T060000-squeue")).toBe(Date.parse("2026-07-01T10:00:00Z"));
+        expect(squeueRecordTime("20261105T144502-squeue")).toBeNull();
+        expect(squeueRecordTime(undefined)).toBeNull();
+    });
+
+    it("tallies jobs by the ST column of squeue's table", () => {
+        expect(summarizeSqueueJobs(SQUEUE_STDOUT)).toEqual({
+            jobs: 3,
+            states: [
+                ["R", 2],
+                ["PD", 1],
+            ],
+        });
+        expect(summarizeSqueueJobs(`${SQUEUE_HEADER}\n`)).toEqual({ jobs: 0, states: [] });
+        expect(summarizeSqueueJobs("")).toBeNull();
+        expect(summarizeSqueueJobs("slurm_load_jobs error: Socket timed out\n")).toBeNull();
+    });
+
+    it("reads the newest snapshot from today's day branch", async () => {
+        global.fetch = serveGlobalLogs({ "monitor/2026-11-05": snapshotFiles("14/20261105T144502-squeue") });
+
+        const snapshot = await fetchLatestSqueueSnapshot(NOW);
+
+        expect(snapshot).toEqual({
+            branch: "monitor/2026-11-05",
+            recordName: "14/20261105T144502-squeue",
+            takenAt: Date.parse("2026-11-05T19:45:02Z"),
+            stdout: SQUEUE_STDOUT,
+            stderr: "",
+            exitStatus: "0",
+            sourceUrl:
+                "https://github.com/dandi-compute/dandi-compute-global-logs/blob/monitor/2026-11-05/monitor/14/20261105T144502-squeue/stdout",
+        });
+        const urls = global.fetch.mock.calls.map(([url]) => url);
+        expect(urls[0]).toBe(`${RAW}/monitor/2026-11-05/monitor/LATEST`);
+        // The pointer is only needed when today has no branch.
+        expect(urls.some((url) => url.includes("monitor/latest"))).toBe(false);
+    });
+
+    it("follows monitor/latest when today has no day branch", async () => {
+        global.fetch = serveGlobalLogs({
+            "monitor/latest": { LATEST: "monitor/2026-11-02\n" },
+            "monitor/2026-11-02": snapshotFiles("06/20261102T065502-squeue"),
+        });
+
+        const snapshot = await fetchLatestSqueueSnapshot(NOW);
+
+        expect(snapshot.branch).toBe("monitor/2026-11-02");
+        expect(snapshot.recordName).toBe("06/20261102T065502-squeue");
+        expect(snapshot.takenAt).toBe(Date.parse("2026-11-02T11:55:02Z"));
+        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 3)).toEqual([
+            `${RAW}/monitor/2026-11-05/monitor/LATEST`,
+            `${RAW}/monitor/latest/LATEST`,
+            `${RAW}/monitor/2026-11-02/monitor/LATEST`,
+        ]);
+    });
+
+    it("resolves to null when neither today's branch nor a valid pointer leads to a snapshot", async () => {
+        global.fetch = serveGlobalLogs({});
+        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
+
+        global.fetch = serveGlobalLogs({ "monitor/latest": { LATEST: "../../main\n" } });
+        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
+        expect(global.fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("tolerates a missing stderr or exit status but not an unreachable repository", async () => {
+        const record = "14/20261105T144502-squeue";
+        global.fetch = serveGlobalLogs({
+            "monitor/2026-11-05": snapshotFiles(record, {
+                [`monitor/${record}/stderr`]: new TypeError("Failed to fetch"),
+                [`monitor/${record}/exit_status`]: undefined,
+            }),
+        });
+        const snapshot = await fetchLatestSqueueSnapshot(NOW);
+        expect(snapshot.stderr).toBe("");
+        expect(snapshot.exitStatus).toBeNull();
+
+        global.fetch = serveGlobalLogs({ "monitor/2026-11-05": { "monitor/LATEST": 503 } });
+        await expect(fetchLatestSqueueSnapshot(NOW)).rejects.toThrow("HTTP 503");
+    });
+
+    it("renders a fresh snapshot as a live terminal", () => {
+        const html = renderSqueueMonitor(
+            {
+                snapshot: {
+                    branch: "monitor/2026-11-05",
+                    recordName: "14/20261105T144502-squeue",
+                    takenAt: Date.parse("2026-11-05T19:45:02Z"),
+                    stdout: SQUEUE_STDOUT,
+                    stderr: "",
+                    exitStatus: "0",
+                    sourceUrl: "https://github.com/dandi-compute/dandi-compute-global-logs/blob/x/stdout",
+                },
+            },
+            NOW.getTime()
+        );
+        const root = document.createElement("div");
+        root.innerHTML = html;
+
+        expect(root.querySelector(".squeue-status").textContent).toBe("live");
+        expect(root.querySelector(".squeue-status").className).toContain("squeue-status-live");
+        expect(root.querySelector(".squeue-age").textContent).toBe("3 min ago");
+        expect(root.querySelector(".squeue-age").getAttribute("datetime")).toBe("2026-11-05T19:45:02.000Z");
+        expect(root.querySelector(".squeue-tally").textContent).toBe("3 jobsR 2PD 1");
+        expect(root.querySelector(".squeue-state").title).toBe("running");
+        expect(root.querySelector(".squeue-source").textContent).toBe("monitor/2026-11-05 ↗");
+        const screen = root.querySelector(".squeue-screen");
+        expect(screen.querySelector(".squeue-prompt").textContent).toBe("$");
+        expect(screen.textContent).toContain("$ squeue --me\n");
+        expect(screen.querySelector(".squeue-head").textContent).toBe(SQUEUE_HEADER.trimEnd());
+        // Job names are text, never markup; squeue's column padding is trimmed.
+        expect(screen.textContent).toContain("aind <ephys>");
+        expect(screen.innerHTML).toContain("aind &lt;ephys&gt;");
+        expect(screen.textContent).toContain("node1409\n");
+        expect(screen.querySelector(".squeue-stderr")).toBeNull();
+        expect(screen.querySelector(".squeue-cursor")).not.toBeNull();
+    });
+
+    it("marks an old snapshot stale and shows a failed squeue's stderr and exit status", () => {
+        const root = document.createElement("div");
+        root.innerHTML = renderSqueueMonitor(
+            {
+                snapshot: {
+                    branch: "monitor/2026-11-02",
+                    recordName: "06/20261102T065502-squeue",
+                    takenAt: Date.parse("2026-11-02T11:55:02Z"),
+                    stdout: "",
+                    stderr: "slurm_load_jobs error: Socket timed out on send/recv operation\n",
+                    exitStatus: "1",
+                    sourceUrl: "https://example.org/stdout",
+                },
+                error: "Could not load the latest squeue snapshot: Failed to fetch",
+            },
+            NOW.getTime()
+        );
+
+        expect(root.querySelector(".squeue-status").textContent).toBe("stale");
+        expect(root.querySelector(".squeue-age").textContent).toBe("3 days ago");
+        expect(root.querySelector(".squeue-refresh-failed").title).toContain("Failed to fetch");
+        expect(root.querySelector(".squeue-tally")).toBeNull();
+        expect([...root.querySelectorAll(".squeue-stderr")].map((el) => el.textContent)).toEqual([
+            "slurm_load_jobs error: Socket timed out on send/recv operation",
+            "[exit status 1]",
+        ]);
+    });
+
+    it("renders the connecting, missing and unavailable states", () => {
+        const statusOf = (state) => {
+            const root = document.createElement("div");
+            root.innerHTML = renderSqueueMonitor(state, NOW.getTime());
+            return [
+                root.querySelector(".squeue-status").textContent,
+                root.querySelector(".squeue-stderr")?.textContent,
+            ];
+        };
+        expect(statusOf({ snapshot: undefined })).toEqual(["connecting", undefined]);
+        expect(statusOf({ snapshot: null })).toEqual([
+            "no snapshots",
+            "No squeue snapshot found in dandi-compute-global-logs.",
+        ]);
+        expect(statusOf({ snapshot: undefined, error: "Could not load <it>" })).toEqual([
+            "unavailable",
+            "Could not load <it>",
+        ]);
+    });
+
+    it("mounts above the dashboard title, polls, and keeps the last snapshot when a refresh fails", async () => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+        vi.setSystemTime(NOW);
+        document.body.innerHTML = `<div class="page-content"><h1>AIND Ephys Pipeline Results</h1></div>`;
+        global.fetch = serveGlobalLogs({ "monitor/2026-11-05": snapshotFiles("14/20261105T144502-squeue") });
+
+        const first = initSqueueMonitor();
+        const monitor = document.getElementById("squeue-monitor");
+        expect(document.querySelector(".page-content").firstElementChild).toBe(monitor);
+        expect(monitor.querySelector(".squeue-status").textContent).toBe("connecting");
+        await first;
+        expect(monitor.querySelector(".squeue-status").textContent).toBe("live");
+        expect(monitor.querySelector(".squeue-age").textContent).toBe("3 min ago");
+
+        // Calling init again neither remounts nor starts a second poller.
+        await initSqueueMonitor();
+        expect(document.querySelectorAll("#squeue-monitor")).toHaveLength(1);
+
+        global.fetch = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+        vi.advanceTimersByTime(60 * 1000);
+        expect(global.fetch).toHaveBeenCalledTimes(1);
+        await refreshSqueueMonitor();
+        expect(monitor.querySelector(".squeue-status").textContent).toBe("live");
+        expect(monitor.querySelector(".squeue-age").textContent).toBe("4 min ago");
+        expect(monitor.querySelector(".squeue-refresh-failed")).not.toBeNull();
+        expect(monitor.querySelector(".squeue-screen").textContent).toContain("DANDI-Compute-Submitter");
     });
 });
