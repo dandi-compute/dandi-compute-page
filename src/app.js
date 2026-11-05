@@ -2049,7 +2049,6 @@ const MONITOR_POINTER_BRANCH = "monitor/latest";
 const MONITOR_TIME_ZONE = "America/New_York";
 const MONITOR_DAY_BRANCH_PATTERN = /^monitor\/\d{4}-\d{2}-\d{2}$/;
 const SQUEUE_RECORD_PATTERN = /^\d{2}\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})-[\w.-]+$/;
-const SQUEUE_COMMAND = "squeue --me";
 const SQUEUE_POLL_INTERVAL_MS = 60 * 1000;
 // Three missed 5-minute snapshots mark the view stale.
 const SQUEUE_STALE_AFTER_MS = 15 * 60 * 1000;
@@ -2201,29 +2200,101 @@ function renderSqueueStatus(kind, label) {
     return `<span class="squeue-status squeue-status-${kind}">${e(label)}</span>`;
 }
 
-function renderSqueueTally(stdout) {
-    const summary = summarizeSqueueJobs(stdout);
-    if (!summary) return "";
-    const states = summary.states
-        .map(([state, count]) => {
-            const name = SLURM_STATE_NAMES[state];
-            return `<span class="squeue-state"${name ? ` title="${e(name)}"` : ""}>${e(state)} ${count}</span>`;
-        })
-        .join("");
-    return `<span class="squeue-tally">${summary.jobs} job${summary.jobs === 1 ? "" : "s"}${states}</span>`;
+// How a SLURM state code is coloured: running, pending, ended badly, or other.
+function slurmStateKind(state) {
+    if (state === "R") return "running";
+    if (state === "PD") return "pending";
+    if (["F", "TO", "OOM", "NF", "BF", "DL", "CA", "PR"].includes(state)) return "failed";
+    return "other";
 }
 
-// One snapshot's screen: squeue's header dimmed, then its rows, then whatever
-// it wrote to stderr and a non-zero exit status.
-function renderSqueueOutput(snapshot) {
-    const [header, ...rows] = squeueScreenText(snapshot.stdout).split("\n");
-    let html = header ? `<span class="squeue-head">${e(header)}</span>\n` : "";
-    if (rows.length > 0) html += `${e(rows.join("\n"))}\n`;
-    const stderr = squeueScreenText(snapshot.stderr);
-    if (stderr) html += `<span class="squeue-stderr">${e(stderr)}</span>\n`;
-    if (snapshot.exitStatus && snapshot.exitStatus !== "0") {
-        html += `<span class="squeue-stderr">[exit status ${e(snapshot.exitStatus)}]</span>\n`;
+function renderSlurmState(state, label = state) {
+    const name = SLURM_STATE_NAMES[state];
+    return `<span class="squeue-st squeue-st-${slurmStateKind(state)}"${name ? ` title="${e(name)}"` : ""}>${e(label)}</span>`;
+}
+
+// One chip per state in the title bar, e.g. "R 2" and "PD 1".
+function renderSqueueTally(stdout) {
+    const summary = summarizeSqueueJobs(stdout);
+    if (!summary || summary.states.length === 0) return "";
+    const states = summary.states.map(([state, count]) => renderSlurmState(state, `${state} ${count}`)).join("");
+    return `<span class="squeue-tally">${states}</span>`;
+}
+
+// squeue's fixed-width table as cells. squeue pads every field to its width
+// and separates fields by a space, so the columns are the runs of positions
+// that are not blank on every line. A column is right-aligned when every
+// value in it, header included, ends at its right edge. Null when that does
+// not give one column per header word.
+function parseSqueueTable(text) {
+    const lines = text.split("\n").filter((line) => line.trim() !== "");
+    if (lines.length === 0) return null;
+    const width = lines.reduce((widest, line) => Math.max(widest, line.length), 0);
+    const used = new Array(width).fill(false);
+    for (const line of lines) {
+        for (let i = 0; i < line.length; i++) if (line[i] !== " ") used[i] = true;
     }
+    const spans = [];
+    for (let i = 0; i < width; i++) {
+        if (!used[i]) continue;
+        const start = i;
+        while (i < width && used[i]) i++;
+        spans.push([start, i]);
+    }
+    const labels = lines[0].trim().split(/\s+/);
+    if (spans.length !== labels.length) return null;
+    const columns = spans.map(([start, end], index) => ({
+        label: labels[index],
+        right: lines.every((line) => {
+            const cell = line.slice(start, end);
+            return cell.trim() === "" || (cell.length === end - start && cell[cell.length - 1] !== " ");
+        }),
+    }));
+    const rows = lines.slice(1).map((line) => spans.map(([start, end]) => line.slice(start, end).trim()));
+    return { columns, rows };
+}
+
+function renderSqueueTable({ columns, rows }) {
+    const stateColumn = columns.findIndex(({ label }) => label === "ST" || label === "STATE");
+    const reasonColumn = columns.findIndex(({ label }) => label.startsWith("NODELIST"));
+    const numeric = (column) => (column.right ? ' class="squeue-num"' : "");
+    const head = columns.map((column) => `<th scope="col"${numeric(column)}>${e(column.label)}</th>`).join("");
+    const body = rows
+        .map((row) => {
+            const cells = row.map((cell, index) => {
+                if (index === stateColumn && cell)
+                    return `<td${numeric(columns[index])}>${renderSlurmState(cell)}</td>`;
+                // A pending job's reason, e.g. "(Priority)", rather than the nodes it runs on.
+                if (index === reasonColumn && cell.startsWith("(") && cell.endsWith(")")) {
+                    return `<td class="squeue-reason">${e(cell)}</td>`;
+                }
+                return `<td${numeric(columns[index])}>${e(cell)}</td>`;
+            });
+            return `<tr>${cells.join("")}</tr>`;
+        })
+        .join("");
+    const empty = `<tr><td class="squeue-empty" colspan="${columns.length}">No jobs in the queue.</td></tr>`;
+    return `<table class="squeue-table"><thead><tr>${head}</tr></thead><tbody>${body || empty}</tbody></table>`;
+}
+
+// One snapshot's screen: squeue's table (as plain text when it does not parse
+// as one), then whatever squeue wrote to stderr and a non-zero exit status.
+function renderSqueueOutput(snapshot) {
+    let html = "";
+    const stdout = squeueScreenText(snapshot.stdout);
+    const table = stdout ? parseSqueueTable(stdout) : null;
+    if (table) {
+        html += renderSqueueTable(table);
+    } else if (stdout) {
+        const [header, ...rows] = stdout.split("\n");
+        const rest = rows.length > 0 ? `\n${e(rows.join("\n"))}` : "";
+        html += `<pre class="squeue-text"><span class="squeue-head">${e(header)}</span>${rest}</pre>`;
+    }
+    const messages = [];
+    const stderr = squeueScreenText(snapshot.stderr);
+    if (stderr) messages.push(e(stderr));
+    if (snapshot.exitStatus && snapshot.exitStatus !== "0") messages.push(`[exit status ${e(snapshot.exitStatus)}]`);
+    if (messages.length > 0) html += `<pre class="squeue-text squeue-stderr">${messages.join("\n")}</pre>`;
     return html;
 }
 
@@ -2255,10 +2326,10 @@ function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now()) 
         body = renderSqueueOutput(snapshot);
     } else if (error) {
         status = renderSqueueStatus("error", "unavailable");
-        body = `<span class="squeue-stderr">${e(error)}</span>\n`;
+        body = `<pre class="squeue-text squeue-stderr">${e(error)}</pre>`;
     } else if (snapshot === null) {
         status = renderSqueueStatus("error", "no snapshots");
-        body = `<span class="squeue-stderr">No squeue snapshot found in dandi-compute-global-logs.</span>\n`;
+        body = `<pre class="squeue-text squeue-stderr">No squeue snapshot found in dandi-compute-global-logs.</pre>`;
     } else {
         status = renderSqueueStatus("connecting", "connecting");
     }
@@ -2267,13 +2338,11 @@ function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now()) 
     return `
 <div class="squeue-bar">
     <span class="squeue-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-    <span class="squeue-title">squeue · MIT Engaging</span>
     ${tally}
     <span class="squeue-bar-spacer"></span>
     ${status}${meta}
 </div>
-<pre class="squeue-screen" tabindex="0"><span class="squeue-prompt">$</span> ${e(SQUEUE_COMMAND)}
-${body}<span class="squeue-cursor" aria-hidden="true"></span></pre>`;
+<div class="squeue-screen" tabindex="0">${body}</div>`;
 }
 
 let _squeueMonitorState = { snapshot: undefined, error: null };

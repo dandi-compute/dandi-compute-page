@@ -4051,13 +4051,12 @@ describe("progressive hydration helpers", () => {
 
 describe("live squeue monitor", () => {
     const RAW = "https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads";
-    // One line of `squeue --me --format=%.10i %15P %40j %10u %.2t %.10M %.6D %.2C %.10m %30R`.
-    const squeueLine = (id, partition, name, user, state, time, nodes, cpus, memory, reason) =>
+    // One line of `squeue --me --format=%.10i %15P %40j %.2t %.10M %.6D %.2C %.10m %30R`.
+    const squeueLine = (id, partition, name, state, time, nodes, cpus, memory, reason) =>
         [
             id.padStart(10),
             partition.padEnd(15),
             name.padEnd(40),
-            user.padEnd(10),
             state.padStart(2),
             time.padStart(10),
             nodes.padStart(6),
@@ -4069,7 +4068,6 @@ describe("live squeue monitor", () => {
         "JOBID",
         "PARTITION",
         "NAME",
-        "USER",
         "ST",
         "TIME",
         "NODES",
@@ -4079,20 +4077,9 @@ describe("live squeue monitor", () => {
     );
     const SQUEUE_STDOUT = [
         SQUEUE_HEADER,
-        squeueLine(
-            "28006829",
-            "mit_preemptable",
-            "DANDI-Compute-Submitter",
-            "cb239",
-            "R",
-            "0:52",
-            "1",
-            "1",
-            "1G",
-            "node1409"
-        ),
-        squeueLine("28006900", "mit_preemptable", "aind <ephys>", "cb239", "R", "12:01", "1", "8", "64G", "node1410"),
-        squeueLine("28006901", "mit_preemptable", "aind-ephys", "cb239", "PD", "0:00", "1", "8", "64G", "(Priority)"),
+        squeueLine("28006829", "mit_preemptable", "DANDI-Compute-Submitter", "R", "0:52", "1", "1", "1G", "node1409"),
+        squeueLine("28006900", "mit_preemptable", "aind <ephys>", "R", "12:01", "1", "8", "64G", "node1410"),
+        squeueLine("28006901", "mit_preemptable", "aind-ephys", "PD", "0:00", "1", "8", "64G", "(Priority)"),
         "",
     ].join("\n");
 
@@ -4159,9 +4146,9 @@ describe("live squeue monitor", () => {
         // Codes the tally doesn't know go last, alphabetically.
         const unusual = [
             SQUEUE_HEADER,
-            squeueLine("1", "p", "a", "u", "SE", "0:00", "1", "1", "1G", "(None)"),
-            squeueLine("2", "p", "b", "u", "PD", "0:00", "1", "1", "1G", "(Priority)"),
-            squeueLine("3", "p", "c", "u", "BF", "0:00", "1", "1", "1G", "(None)"),
+            squeueLine("1", "p", "a", "SE", "0:00", "1", "1", "1G", "(None)"),
+            squeueLine("2", "p", "b", "PD", "0:00", "1", "1", "1G", "(Priority)"),
+            squeueLine("3", "p", "c", "BF", "0:00", "1", "1", "1G", "(None)"),
         ].join("\n");
         expect(summarizeSqueueJobs(unusual).states).toEqual([
             ["PD", 1],
@@ -4259,19 +4246,83 @@ describe("live squeue monitor", () => {
         expect(root.querySelector(".squeue-status").className).toContain("squeue-status-live");
         expect(root.querySelector(".squeue-age").textContent).toBe("3 min ago");
         expect(root.querySelector(".squeue-age").getAttribute("datetime")).toBe("2026-11-05T19:45:02.000Z");
-        expect(root.querySelector(".squeue-tally").textContent).toBe("3 jobsR 2PD 1");
-        expect(root.querySelector(".squeue-state").title).toBe("running");
+        // The bar holds one chip per state, with no title or job count.
+        const chips = [...root.querySelectorAll(".squeue-tally .squeue-st")];
+        expect(chips.map((chip) => [chip.textContent, chip.title, chip.className])).toEqual([
+            ["R 2", "running", "squeue-st squeue-st-running"],
+            ["PD 1", "pending", "squeue-st squeue-st-pending"],
+        ]);
+        expect(root.querySelector(".squeue-bar").textContent).not.toMatch(/jobs?\b|MIT Engaging/);
         expect(root.querySelector(".squeue-source").textContent).toBe("monitor/2026-11-05 ↗");
+
+        // squeue's output is a table: no prompt, no cursor, no padding.
         const screen = root.querySelector(".squeue-screen");
-        expect(screen.querySelector(".squeue-prompt").textContent).toBe("$");
-        expect(screen.textContent).toContain("$ squeue --me\n");
-        expect(screen.querySelector(".squeue-head").textContent).toBe(SQUEUE_HEADER.trimEnd());
-        // Job names are text, never markup; squeue's column padding is trimmed.
-        expect(screen.textContent).toContain("aind <ephys>");
+        expect(screen.textContent).not.toContain("$");
+        expect(screen.querySelector(".squeue-cursor")).toBeNull();
+        const headers = [...screen.querySelectorAll("thead th")];
+        expect(headers.map((th) => th.textContent)).toEqual([
+            "JOBID",
+            "PARTITION",
+            "NAME",
+            "ST",
+            "TIME",
+            "NODES",
+            "CP",
+            "MIN_MEMORY",
+            "NODELIST(REASON)",
+        ]);
+        // Right-aligned in squeue, right-aligned here.
+        expect(headers.filter((th) => th.className === "squeue-num").map((th) => th.textContent)).toEqual([
+            "JOBID",
+            "ST",
+            "TIME",
+            "NODES",
+            "CP",
+            "MIN_MEMORY",
+        ]);
+        const rows = [...screen.querySelectorAll("tbody tr")].map((tr) => [...tr.cells]);
+        expect(rows.map((cells) => cells.map((td) => td.textContent))).toEqual([
+            ["28006829", "mit_preemptable", "DANDI-Compute-Submitter", "R", "0:52", "1", "1", "1G", "node1409"],
+            ["28006900", "mit_preemptable", "aind <ephys>", "R", "12:01", "1", "8", "64G", "node1410"],
+            ["28006901", "mit_preemptable", "aind-ephys", "PD", "0:00", "1", "8", "64G", "(Priority)"],
+        ]);
+        // Job names are text, never markup.
         expect(screen.innerHTML).toContain("aind &lt;ephys&gt;");
-        expect(screen.textContent).toContain("node1409\n");
+        expect(rows[2][3].querySelector(".squeue-st").className).toBe("squeue-st squeue-st-pending");
+        expect(rows[2][3].querySelector(".squeue-st").title).toBe("pending");
+        // A pending job's reason is set apart from a node list.
+        expect(rows[2][8].className).toBe("squeue-reason");
+        expect(rows[0][8].className).toBe("");
         expect(screen.querySelector(".squeue-stderr")).toBeNull();
-        expect(screen.querySelector(".squeue-cursor")).not.toBeNull();
+    });
+
+    it("shows an empty queue, the older format with USER, and output that is not a table", () => {
+        const screenOf = (stdout) => {
+            const root = document.createElement("div");
+            const snapshot = { branch: "b", sourceUrl: "u", stdout, stderr: "", exitStatus: "0", takenAt: 0 };
+            root.innerHTML = renderSqueueMonitor({ snapshot }, 0);
+            return root.querySelector(".squeue-screen");
+        };
+
+        const empty = screenOf(`${SQUEUE_HEADER}\n`);
+        expect(empty.querySelectorAll("thead th")).toHaveLength(9);
+        expect(empty.querySelector("tbody td.squeue-empty").textContent).toBe("No jobs in the queue.");
+        expect(empty.querySelector("tbody td.squeue-empty").colSpan).toBe(9);
+
+        // Snapshots recorded before USER was dropped from the format still render as a table.
+        const older = [
+            "     JOBID PARTITION       NAME                                     USER       ST       TIME  NODES CP MIN_MEMORY NODELIST(REASON)              ",
+            "  28006829 mit_preemptable DANDI-Compute-Submitter                  cb239       R       0:52      1  1         1G node1409                      ",
+        ].join("\n");
+        const olderScreen = screenOf(older);
+        expect([...olderScreen.querySelectorAll("thead th")].map((th) => th.textContent)).toContain("USER");
+        expect([...olderScreen.querySelectorAll("tbody td")].map((td) => td.textContent)).toContain("cb239");
+
+        // Columns that don't line up with the header words fall back to the text as it is.
+        const ragged = screenOf("JOBID STATE\n12 running late\n");
+        expect(ragged.querySelector("table")).toBeNull();
+        expect(ragged.querySelector("pre.squeue-text .squeue-head").textContent).toBe("JOBID STATE");
+        expect(ragged.querySelector("pre.squeue-text").textContent).toBe("JOBID STATE\n12 running late");
     });
 
     it("marks an old snapshot stale and shows a failed squeue's stderr and exit status", () => {
@@ -4296,9 +4347,9 @@ describe("live squeue monitor", () => {
         expect(root.querySelector(".squeue-age").textContent).toBe("3 days ago");
         expect(root.querySelector(".squeue-refresh-failed").title).toContain("Failed to fetch");
         expect(root.querySelector(".squeue-tally")).toBeNull();
+        expect(root.querySelector(".squeue-screen table")).toBeNull();
         expect([...root.querySelectorAll(".squeue-stderr")].map((el) => el.textContent)).toEqual([
-            "slurm_load_jobs error: Socket timed out on send/recv operation",
-            "[exit status 1]",
+            "slurm_load_jobs error: Socket timed out on send/recv operation\n[exit status 1]",
         ]);
     });
 
@@ -4320,9 +4371,9 @@ describe("live squeue monitor", () => {
 
         const states = render(
             0,
-            [SQUEUE_HEADER, squeueLine("1", "p", "a", "u", "BF", "0", "1", "1", "1G", "")].join("\n")
-        ).querySelectorAll(".squeue-state");
-        expect([...states].map((el) => [el.textContent, el.hasAttribute("title")])).toEqual([["BF 1", false]]);
+            [SQUEUE_HEADER, squeueLine("1", "p", "a", "XX", "0", "1", "1", "1G", "")].join("\n")
+        ).querySelectorAll(".squeue-tally .squeue-st");
+        expect([...states].map((el) => [el.textContent, el.hasAttribute("title")])).toEqual([["XX 1", false]]);
     });
 
     it("trims blank lines around the output in linear time", () => {
@@ -4339,9 +4390,10 @@ describe("live squeue monitor", () => {
         const started = performance.now();
         root.innerHTML = renderSqueueMonitor({ snapshot }, NOW.getTime());
         expect(performance.now() - started).toBeLessThan(2000);
-        const screen = root.querySelector(".squeue-screen").textContent;
-        expect(screen.startsWith(`$ squeue --me\n${SQUEUE_HEADER.trimEnd()}\n`)).toBe(true);
-        expect(screen.endsWith("x\nboom\n[exit status 1]\n")).toBe(true);
+        const [output, messages] = root.querySelectorAll(".squeue-screen pre.squeue-text");
+        expect(output.textContent.startsWith(`${SQUEUE_HEADER.trimEnd()}\n`)).toBe(true);
+        expect(output.textContent.endsWith("\nx")).toBe(true);
+        expect(messages.textContent).toBe("boom\n[exit status 1]");
     });
 
     it("renders the connecting, missing and unavailable states", () => {
