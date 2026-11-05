@@ -2232,22 +2232,21 @@ function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now()) 
     let meta = "";
     let body = "";
     if (snapshot) {
-        const age = snapshot.takenAt === null ? null : now - snapshot.takenAt;
-        const stale = age === null || age > SQUEUE_STALE_AFTER_MS;
+        // takenAt is always known: fetchLatestSqueueSnapshot only accepts record names it can date.
+        const age = now - snapshot.takenAt;
+        const stale = age > SQUEUE_STALE_AFTER_MS;
         status = renderSqueueStatus(stale ? "stale" : "live", stale ? "stale" : "live");
-        if (age !== null) {
-            const takenAt = new Date(snapshot.takenAt);
-            const exact = takenAt.toLocaleString(undefined, {
-                year: "numeric",
-                month: "short",
-                day: "numeric",
-                hour: "numeric",
-                minute: "2-digit",
-                second: "2-digit",
-                timeZoneName: "short",
-            });
-            meta += `<time class="squeue-age" datetime="${e(takenAt.toISOString())}" title="Snapshot taken ${e(exact)}">${e(formatSnapshotAge(age))}</time>`;
-        }
+        const takenAt = new Date(snapshot.takenAt);
+        const exact = takenAt.toLocaleString(undefined, {
+            year: "numeric",
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+            second: "2-digit",
+            timeZoneName: "short",
+        });
+        meta += `<time class="squeue-age" datetime="${e(takenAt.toISOString())}" title="Snapshot taken ${e(exact)}">${e(formatSnapshotAge(age))}</time>`;
         if (error) meta += `<span class="squeue-refresh-failed" title="${e(error)}">refresh failed</span>`;
         meta += `<a class="squeue-source" href="${e(snapshot.sourceUrl)}" target="_blank" rel="noopener">${e(snapshot.branch)} ↗</a>`;
         body = renderSqueueOutput(snapshot);

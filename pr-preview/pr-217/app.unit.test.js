@@ -4156,6 +4156,18 @@ describe("live squeue monitor", () => {
                 ["PD", 1],
             ],
         });
+        // Codes the tally doesn't know go last, alphabetically.
+        const unusual = [
+            SQUEUE_HEADER,
+            squeueLine("1", "p", "a", "u", "SE", "0:00", "1", "1", "1G", "(None)"),
+            squeueLine("2", "p", "b", "u", "PD", "0:00", "1", "1", "1G", "(Priority)"),
+            squeueLine("3", "p", "c", "u", "BF", "0:00", "1", "1", "1G", "(None)"),
+        ].join("\n");
+        expect(summarizeSqueueJobs(unusual).states).toEqual([
+            ["PD", 1],
+            ["BF", 1],
+            ["SE", 1],
+        ]);
         expect(summarizeSqueueJobs(`${SQUEUE_HEADER}\n`)).toEqual({ jobs: 0, states: [] });
         expect(summarizeSqueueJobs("")).toBeNull();
         expect(summarizeSqueueJobs("slurm_load_jobs error: Socket timed out\n")).toBeNull();
@@ -4290,6 +4302,29 @@ describe("live squeue monitor", () => {
         ]);
     });
 
+    it("words a snapshot's age by minutes, hours or days, and titles only known states", () => {
+        const render = (agoMs, stdout = SQUEUE_STDOUT) => {
+            const root = document.createElement("div");
+            const snapshot = { branch: "b", sourceUrl: "u", stdout, stderr: "", exitStatus: "0", takenAt: 0 };
+            root.innerHTML = renderSqueueMonitor({ snapshot }, agoMs);
+            return root;
+        };
+        expect(render(30 * 1000).querySelector(".squeue-age").textContent).toBe("just now");
+        // A snapshot from a skewed clock's future is "just now" too, not a negative age.
+        expect(render(-5 * 60 * 1000).querySelector(".squeue-age").textContent).toBe("just now");
+        expect(render(14 * 60 * 1000).querySelector(".squeue-status").textContent).toBe("live");
+        expect(render(16 * 60 * 1000).querySelector(".squeue-status").textContent).toBe("stale");
+        expect(render(5 * 3600 * 1000 + 59 * 60 * 1000).querySelector(".squeue-age").textContent).toBe("5 h ago");
+        expect(render(47 * 3600 * 1000).querySelector(".squeue-age").textContent).toBe("47 h ago");
+        expect(render(48 * 3600 * 1000).querySelector(".squeue-age").textContent).toBe("2 days ago");
+
+        const states = render(
+            0,
+            [SQUEUE_HEADER, squeueLine("1", "p", "a", "u", "BF", "0", "1", "1", "1G", "")].join("\n")
+        ).querySelectorAll(".squeue-state");
+        expect([...states].map((el) => [el.textContent, el.hasAttribute("title")])).toEqual([["BF 1", false]]);
+    });
+
     it("renders the connecting, missing and unavailable states", () => {
         const statusOf = (state) => {
             const root = document.createElement("div");
@@ -4308,6 +4343,13 @@ describe("live squeue monitor", () => {
             "unavailable",
             "Could not load <it>",
         ]);
+    });
+
+    it("does nothing on a page without the page content container", async () => {
+        global.fetch = vi.fn();
+        await initSqueueMonitor();
+        expect(document.getElementById("squeue-monitor")).toBeNull();
+        expect(global.fetch).not.toHaveBeenCalled();
     });
 
     it("mounts above the dashboard title, polls, and keeps the last snapshot when a refresh fails", async () => {
@@ -4336,5 +4378,30 @@ describe("live squeue monitor", () => {
         expect(monitor.querySelector(".squeue-age").textContent).toBe("4 min ago");
         expect(monitor.querySelector(".squeue-refresh-failed")).not.toBeNull();
         expect(monitor.querySelector(".squeue-screen").textContent).toContain("DANDI-Compute-Submitter");
+    });
+
+    it("pauses polling while the tab is hidden and catches up when it is shown", async () => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+        vi.setSystemTime(NOW);
+        document.body.innerHTML = `<div class="page-content"></div>`;
+        global.fetch = serveGlobalLogs({ "monitor/2026-11-05": snapshotFiles("14/20261105T144502-squeue") });
+        let visibility = "hidden";
+        const visibilityState = vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+        try {
+            await initSqueueMonitor();
+            const loadCalls = global.fetch.mock.calls.length;
+
+            vi.advanceTimersByTime(5 * 60 * 1000);
+            expect(global.fetch).toHaveBeenCalledTimes(loadCalls);
+
+            visibility = "visible";
+            document.dispatchEvent(new Event("visibilitychange"));
+            expect(global.fetch.mock.calls.length).toBeGreaterThan(loadCalls);
+            await refreshSqueueMonitor();
+            // Five minutes passed while hidden: the 3-minute-old snapshot is now 8 minutes old.
+            expect(document.querySelector("#squeue-monitor .squeue-age").textContent).toBe("8 min ago");
+        } finally {
+            visibilityState.mockRestore();
+        }
     });
 });
