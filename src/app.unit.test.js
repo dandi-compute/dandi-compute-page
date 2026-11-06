@@ -4537,3 +4537,200 @@ describe("live squeue monitor", () => {
         }
     });
 });
+
+describe("common issues extraction", () => {
+    const { extractLogFailure, normalizeIssueSignature, groupIssues, issueRecordFromLog } = require("./app");
+
+    const FAILED_BLOCK = [
+        "Oct-03 23:47:23.206 [Task monitor] DEBUG n.processor.TaskPollingMonitor - Task completed > TaskHandler[jobId: 1; name: validate_params (validate_params); status: COMPLETED; exit: 0; error: -]",
+        "Oct-03 23:55:01.001 [TaskFinalizer-1] ERROR nextflow.processor.TaskProcessor - Error executing process > 'postprocessing (postprocessing)'",
+        "",
+        "Caused by:",
+        "  Process `postprocessing (postprocessing)` terminated with an error exit status (1)",
+        "",
+        "Command executed:",
+        "",
+        "  #!/usr/bin/env bash",
+        '  ./run --params \'{"error_strategy": "raise"}\'',
+        "",
+        "Command exit status:",
+        "  1",
+        "",
+        "Command output:",
+        "  [postprocessing] running capsule...",
+        "",
+        "Command error:",
+        "  Cloning into 'capsule-repo'...",
+        "  + python -u run_capsule.py --params '{}'",
+        "  Traceback (most recent call last):",
+        '    File "capsule/code/run_capsule.py", line 336, in <module>',
+        "      sorting_analyzer.set_temporary_recording(recording_tmp)",
+        "  ValueError: Recording channel locations do not match.",
+        "  Exception ignored in: <function _BaseNWBExtractor.__del__ at 0x153bcfa893a0>",
+        "  ImportError: sys.meta_path is None, Python is likely shutting down",
+        "",
+        "Work dir:",
+        "  /orcd/data/dandi/001/dandi-compute/work/1c/5f46684efd88c8735fc1420dbd648a",
+        "",
+        "Oct-03 23:55:02.000 [main] DEBUG nextflow.Session - Session aborted -- Cause: Process `postprocessing (postprocessing)` terminated with an error exit status (1)",
+    ].join("\n");
+
+    it("extracts the failing process, exit status, and the real exception line", () => {
+        const failure = extractLogFailure(FAILED_BLOCK);
+        expect(failure.process).toBe("postprocessing");
+        expect(failure.exitStatus).toBe(1);
+        // The shutdown-time "Exception ignored in" ImportError is noise, not the cause.
+        expect(failure.message).toBe("ValueError: Recording channel locations do not match.");
+    });
+
+    it("labels signal kills and time limits by exit status when stderr has no exception", () => {
+        const killed = FAILED_BLOCK.replace("  1\n\nCommand output", "  137\n\nCommand output").replace(
+            /Command error:[\s\S]*?Work dir:/,
+            'Command error:\n  ./run: line 5:   237 Killed                  python -u run_capsule.py "$@"\n\nWork dir:'
+        );
+        expect(extractLogFailure(killed)).toMatchObject({
+            process: "postprocessing",
+            exitStatus: 137,
+            message: "Killed (exit status 137 — likely out of memory)",
+        });
+        const timedOut = FAILED_BLOCK.replace("  1\n\nCommand output", "  140\n\nCommand output").replace(
+            /Command error:[\s\S]*?Work dir:/,
+            "Command error:\n  100%|██████████| 1/1 [33:40<00:00, 2020.59s/it]\n\nWork dir:"
+        );
+        expect(extractLogFailure(timedOut).message).toBe("Time limit exceeded (exit status 140)");
+    });
+
+    it("falls back to a generic error line, then to the exit status, when no exception is printed", () => {
+        const gitError = FAILED_BLOCK.replace(
+            /Command error:[\s\S]*?Work dir:/,
+            "Command error:\n  error: pathspec 'v1.2.4' did not match any file(s) known to git\n\nWork dir:"
+        );
+        expect(extractLogFailure(gitError).message).toBe(
+            "error: pathspec 'v1.2.4' did not match any file(s) known to git"
+        );
+        const silent = FAILED_BLOCK.replace(
+            /Command error:[\s\S]*?Work dir:/,
+            "Command error:\n  (empty)\n\nWork dir:"
+        );
+        expect(extractLogFailure(silent).message).toBe("Exit status 1 (no error message in log)");
+    });
+
+    it("uses the last exception or ERROR line when Nextflow aborted before any process ran", () => {
+        const aborted = [
+            "Jun-22 10:00:00.000 [main] DEBUG nextflow.cli.Launcher - $> nextflow run ...",
+            "Jun-22 10:00:01.000 [main] ERROR nextflow.cli.Launcher - @unknown",
+            "nextflow.exception.AbortOperationException: Remote resource not found: https://api.github.com/repos/x/y/contents/main.nf",
+            "\tat nextflow.scm.AssetManager.readManifest(AssetManager.groovy:100)",
+        ].join("\n");
+        expect(extractLogFailure(aborted)).toEqual({
+            process: null,
+            exitStatus: null,
+            message:
+                "nextflow.exception.AbortOperationException: Remote resource not found: https://api.github.com/repos/x/y/contents/main.nf",
+        });
+        expect(extractLogFailure("")).toEqual({ process: null, exitStatus: null, message: null });
+        expect(extractLogFailure(null)).toEqual({ process: null, exitStatus: null, message: null });
+    });
+
+    it("strips terminal color codes from error lines", () => {
+        const colored = FAILED_BLOCK.replace(
+            /Command error:[\s\S]*?Work dir:/,
+            "Command error:\n  \x1b[91mERROR  : Failed to create user namespace\x1b[0m\n\nWork dir:"
+        );
+        expect(extractLogFailure(colored).message).toBe("ERROR  : Failed to create user namespace");
+    });
+
+    it("normalizes volatile message parts into a stable signature", () => {
+        expect(
+            normalizeIssueSignature(
+                "RuntimeError: File /orcd/data/dandi/001/s3dandiarchive/blobs/2e3/a4e/2e3a4ea6-f5d0-4bc5-a564-aa35f7415553 is not an existing file or folder!"
+            )
+        ).toBe("RuntimeError: File <path> is not an existing file or folder!");
+        expect(
+            normalizeIssueSignature(
+                "ValueError: Found array with 0 sample(s) (shape=(0, 61)) while a minimum of 1 is required"
+            )
+        ).toBe("ValueError: Found array with <n> sample(s) (shape=(<n>, <n>)) while a minimum of <n> is required");
+        expect(
+            normalizeIssueSignature("AbortOperationException: Remote resource not found: https://api.github.com/a/b")
+        ).toBe("AbortOperationException: Remote resource not found: <url>");
+        expect(
+            normalizeIssueSignature("Exception ignored in: <function f at 0x153bcfa893a0> commit e8823a8a6637c7ea")
+        ).toBe("Exception ignored in: <function f at <addr>> commit <hash>");
+        // Labels this page synthesizes stay as-is (their numbers are the point).
+        expect(normalizeIssueSignature("Killed (exit status 137 — likely out of memory)")).toBe(
+            "Killed (exit status 137 — likely out of memory)"
+        );
+        expect(normalizeIssueSignature(null)).toBeNull();
+    });
+
+    it("groups scanned runs by signature, most frequent first, with jobs lacking details last", () => {
+        const record = (message, process = "preprocessing", exitStatus = 1) => ({
+            ...issueRecordFromLog(null),
+            process,
+            exitStatus,
+            message,
+            signature: normalizeIssueSignature(message),
+        });
+        const runs = [
+            {
+                pipelineVersion: "1.3.3",
+                source: "main",
+                dandisetId: "000001",
+                createdAt: "2026-10-02T00:00:00Z",
+                issue: record("ValueError: boom 1"),
+            },
+            {
+                pipelineVersion: "1.4.0",
+                source: "archive",
+                dandisetId: "000002",
+                createdAt: "2026-10-01T00:00:00Z",
+                issue: record("ValueError: boom 2"),
+            },
+            {
+                pipelineVersion: "1.4.0",
+                source: "main",
+                dandisetId: "000001",
+                createdAt: "2026-10-03T00:00:00Z",
+                issue: record("ValueError: boom 3", "job_dispatch"),
+            },
+            {
+                pipelineVersion: "1.3.3",
+                source: "main",
+                dandisetId: "000001",
+                createdAt: null,
+                issue: record(null, null, null),
+            },
+            {
+                pipelineVersion: "1.3.3",
+                source: "main",
+                dandisetId: "000001",
+                createdAt: null,
+                issue: record("Exception: rare"),
+            },
+            { pipelineVersion: "1.3.3", source: "main", dandisetId: "000001", createdAt: null, issue: null }, // not scanned yet
+        ];
+        const groups = groupIssues(runs);
+        expect(groups.map((group) => [group.signature, group.count])).toEqual([
+            ["ValueError: boom <n>", 3],
+            ["Exception: rare", 1],
+            [null, 1],
+        ]);
+        const [top] = groups;
+        expect(top.example).toBe("ValueError: boom 1");
+        expect([...top.processes.entries()]).toEqual([
+            ["preprocessing", 2],
+            ["job_dispatch", 1],
+        ]);
+        expect([...top.versions.entries()].sort()).toEqual([
+            ["1.3.3", 1],
+            ["1.4.0", 2],
+        ]);
+        expect([...top.sources.entries()].sort()).toEqual([
+            ["archive", 1],
+            ["main", 2],
+        ]);
+        expect(top.firstSeen).toBe("2026-10-01T00:00:00Z");
+        expect(top.lastSeen).toBe("2026-10-03T00:00:00Z");
+    });
+});

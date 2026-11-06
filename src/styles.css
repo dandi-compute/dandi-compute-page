@@ -3424,3 +3424,248 @@ a.prov-hash-link:hover {
 [data-theme="light"] .con-logo {
     filter: none;
 }
+
+/* ─── Common Issues page ────────────────────────────────────── */
+.issues-page {
+    max-width: 1200px;
+    margin: 0 auto;
+}
+.issue-intro {
+    color: var(--color-text-secondary);
+    font-size: 0.9em;
+    margin: 0 0 16px;
+}
+.issue-scanning {
+    color: var(--color-accent);
+}
+.issue-empty {
+    color: var(--color-text-secondary);
+    text-align: center;
+    padding: 32px 0;
+}
+.issue-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+.issue-group {
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+.issue-group-nodetails {
+    opacity: 0.75;
+}
+.issue-details > summary::-webkit-details-marker {
+    display: none;
+}
+.issue-summary {
+    list-style: none;
+    display: flex;
+    align-items: flex-start;
+    gap: 14px;
+    padding: 12px 16px;
+    cursor: pointer;
+}
+.issue-summary:hover {
+    background: var(--color-accent-subtle);
+}
+.issue-rank {
+    color: var(--color-text-secondary);
+    font-size: 0.85em;
+    font-weight: 600;
+    min-width: 2.2em;
+    padding-top: 6px;
+}
+.issue-count {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 72px;
+    padding-top: 2px;
+}
+.issue-count-value {
+    font-size: 1.7em;
+    font-weight: 300;
+    line-height: 1.1;
+    color: var(--color-failed);
+}
+.issue-count-label {
+    font-size: 0.72em;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+}
+.issue-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+.issue-message {
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.9em;
+    line-height: 1.4;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--color-text);
+}
+.issue-bar {
+    display: block;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--color-bg);
+    overflow: hidden;
+}
+.issue-bar-fill {
+    display: block;
+    height: 100%;
+    background: var(--color-failed);
+    border-radius: 2px;
+}
+.issue-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 14px;
+    align-items: center;
+    font-size: 0.8em;
+}
+.issue-chip-row {
+    display: inline-flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+}
+.issue-chip-label {
+    color: var(--color-text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.88em;
+    margin-right: 2px;
+}
+.issue-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    background: var(--color-bg);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    padding: 1px 7px;
+    color: var(--color-text);
+    text-decoration: none;
+}
+.issue-chip-link:hover {
+    border-color: var(--color-accent);
+    color: var(--color-accent);
+}
+.issue-chip-count {
+    color: var(--color-text-secondary);
+    font-size: 0.9em;
+}
+.issue-seen {
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+}
+.issue-body {
+    border-top: 1px solid var(--color-border);
+    padding: 12px 16px 14px;
+}
+.issue-example {
+    margin: 0 0 12px;
+    font-size: 0.85em;
+    color: var(--color-text-secondary);
+    overflow-wrap: anywhere;
+}
+.issue-example-label {
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-size: 0.88em;
+    margin-right: 6px;
+}
+.issue-example code {
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    color: var(--color-text);
+    white-space: pre-wrap;
+}
+.issue-jobs-wrap {
+    overflow-x: auto;
+}
+.issue-jobs {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85em;
+}
+.issue-jobs th,
+.issue-jobs td {
+    text-align: left;
+    padding: 5px 10px;
+    border-bottom: 1px solid var(--color-border);
+    white-space: nowrap;
+    vertical-align: middle;
+}
+.issue-jobs th {
+    color: var(--color-text-secondary);
+    font-weight: 600;
+    font-size: 0.85em;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+.issue-jobs .issue-jobs-where {
+    white-space: normal;
+    overflow-wrap: anywhere;
+    min-width: 160px;
+}
+.issue-jobs tbody tr:last-child td {
+    border-bottom: none;
+}
+.issue-jobs tbody tr:hover td {
+    background: var(--color-accent-subtle);
+}
+.issue-job-link {
+    color: var(--color-accent);
+    text-decoration: none;
+    font-weight: 600;
+}
+.issue-job-link:hover {
+    text-decoration: underline;
+}
+.issue-jobs .log-link {
+    font-size: 0.95em;
+    padding: 1px 8px;
+}
+.issue-muted {
+    color: var(--color-text-secondary);
+}
+.stat-of {
+    font-size: 0.5em;
+    color: var(--color-text-secondary);
+}
+.issue-progress {
+    display: block;
+    width: 100%;
+    height: 3px;
+    margin-top: 8px;
+    border-radius: 2px;
+    background: var(--color-border);
+    overflow: hidden;
+}
+.issue-progress-fill {
+    display: block;
+    height: 100%;
+    background: var(--color-accent);
+    transition: width 0.3s ease;
+}
+.stat-scanning .issue-progress-fill {
+    background-image: linear-gradient(90deg, var(--color-accent), var(--color-accent-hover), var(--color-accent));
+}
+@media (max-width: 720px) {
+    .issue-summary {
+        flex-wrap: wrap;
+    }
+    .issue-main {
+        flex-basis: 100%;
+    }
+}
