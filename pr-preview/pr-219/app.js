@@ -6668,8 +6668,11 @@ function extractLogFailure(text) {
         return { ...empty, message: message ? message.slice(0, ISSUE_MESSAGE_MAX_LENGTH) : null };
     }
 
+    // "name (tag)" → "name", without a backtracking-prone regex on log text.
     const processMatch = lines[blockStart].match(/Error executing process > '([^']+)'/);
-    const process = processMatch ? processMatch[1].replace(/\s*\(.*$/, "").trim() || null : null;
+    const processLabel = processMatch ? processMatch[1] : "";
+    const tagIndex = processLabel.indexOf("(");
+    const process = (tagIndex === -1 ? processLabel : processLabel.slice(0, tagIndex)).trim() || null;
 
     const sections = new Map();
     let current = null;
@@ -6954,7 +6957,10 @@ function renderIssueGroup(group, rank, scannedTotal, maxCount, filter) {
 // Render the page from the current scan state. `runs` are the in-filter failed
 // jobs (scanned or not); groups cover the scanned ones.
 function renderIssuesPage(state) {
-    const { runs, scanned, total, filter, done } = state;
+    const { runs, filter, done } = state;
+    // Counts are rendered into markup: coerce them to integers first.
+    const scanned = Math.max(0, Math.trunc(Number(state.scanned)) || 0);
+    const total = Math.max(0, Math.trunc(Number(state.total)) || 0);
     const scannedRuns = runs.filter((run) => run.issue);
     const groups = groupIssues(scannedRuns);
     const noDetails = scannedRuns.filter((run) => !run.issue.signature).length;
