@@ -71,8 +71,8 @@ const TEST_DANDISETS = new Set(["001849"]);
 /* Per-dandiset fallback subject used when a queue entry carries a null subject */
 const DANDISET_SUBJECT_DEFAULTS = new Map([["001849", "test"]]);
 
-/* Module-level view mode ("tests" | "archive" | "compare" | "params" | null),
-   set during init */
+/* Module-level view mode ("dashboard" | "compare" | "params" | "curation" |
+   "tests" | "archive" | "status" | null), set during init */
 let _viewMode = null;
 
 /* Module-level layout mode ("tree" | "flat"), toggled by the layout bar */
@@ -94,7 +94,7 @@ let _openGroupKeys = new Set();
 const FLAT_RENDER_CHUNK = 200;
 let _flatRenderLimit = FLAT_RENDER_CHUNK;
 
-const ALLOWED_VIEW_MODES = new Set(["dashboard", "compare", "params", "curation", "tests", "archive"]);
+const ALLOWED_VIEW_MODES = new Set(["dashboard", "compare", "params", "curation", "tests", "archive", "status"]);
 
 function parseViewMode() {
     const rawView = new URLSearchParams(window.location.search).get("view");
@@ -110,6 +110,7 @@ function syncTopNav(viewMode = parseViewMode()) {
         { selector: '.site-view-toggle-link[href="?view=curation"]', mode: "curation" },
         { selector: '.site-view-toggle-link[href="?view=tests"]', mode: "tests" },
         { selector: '.site-view-toggle-link[href="?view=archive"]', mode: "archive" },
+        { selector: '.site-view-toggle-link[href="?view=status"]', mode: "status" },
     ];
     navLinks.forEach(({ selector, mode }) => {
         const link = document.querySelector(selector);
@@ -2031,7 +2032,7 @@ async function initQueuePriorities() {
     el.style.display = "";
 }
 
-/* ─── Live squeue monitor (top of the dashboard) ────────────── */
+/* ─── Live squeue monitor (top of the dashboard; the Status page) ── */
 /* The runner snapshots the cluster queue (`squeue --me`) every 5 minutes into
    dandi-compute/dandi-compute-global-logs (launcher/record.sh in
    dandi-compute-runner). Each snapshot lands on that day's `monitor/YYYY-MM-DD`
@@ -2044,20 +2045,43 @@ async function initQueuePriorities() {
    lead nowhere, the newest day branch is found by listing the monitor/
    branches through the GitHub API instead (at most every 10 minutes). Files are
    read from the raw CDN (max-age=300), so a new snapshot shows within ~5
-   minutes and the polls in between are browser-cache hits. */
+   minutes and the polls in between are browser-cache hits.
+   The disk usage snapshot is recorded the same way under its own kind, `disk`:
+   `disk/YYYY-MM-DD` branches, disk/{HH}/{YYYYMMDDTHHMMSS}-usage/, disk/LATEST
+   and the `disk/latest` pointer branch. */
 const GLOBAL_LOGS_REPO_URL = "https://github.com/dandi-compute/dandi-compute-global-logs";
 const GLOBAL_LOGS_RAW_BASE = "https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads";
-const MONITOR_POINTER_BRANCH = "monitor/latest";
-// Every branch whose name starts with "monitor" (the API matches by prefix).
-const MONITOR_BRANCHES_URL =
-    "https://api.github.com/repos/dandi-compute/dandi-compute-global-logs/git/matching-refs/heads/monitor";
+// Every branch whose name starts with the kind (the API matches by prefix).
+const monitorBranchesUrl = (kind) =>
+    `https://api.github.com/repos/dandi-compute/dandi-compute-global-logs/git/matching-refs/heads/${kind}`;
 const MONITOR_BRANCHES_TTL_MS = 10 * 60 * 1000;
 const MONITOR_TIME_ZONE = "America/New_York";
-const MONITOR_DAY_BRANCH_PATTERN = /^monitor\/\d{4}-\d{2}-\d{2}$/;
-const SQUEUE_RECORD_PATTERN = /^\d{2}\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})-[\w.-]+$/;
+// A snapshot kind's day branch, e.g. monitor/2026-11-05.
+const dayBranchPattern = (kind) => new RegExp(`^${kind}/\\d{4}-\\d{2}-\\d{2}$`);
+const MONITOR_RECORD_PATTERN = /^\d{2}\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})-[\w.-]+$/;
 const SQUEUE_POLL_INTERVAL_MS = 60 * 1000;
 // Three missed 5-minute snapshots mark the view stale.
 const SQUEUE_STALE_AFTER_MS = 15 * 60 * 1000;
+/* The disk usage snapshot (launcher/disk.sh in dandi-compute-runner) is taken
+   every 30 minutes: `df` for the home and DANDI project directories, then `du`
+   of the home directory itself. Shown on the Status page. */
+const SQUEUE_KIND = "monitor";
+const DISK_KIND = "disk";
+const DISK_POLL_INTERVAL_MS = 5 * 60 * 1000;
+// Three missed 30-minute snapshots mark the view stale.
+const DISK_STALE_AFTER_MS = 90 * 60 * 1000;
+// A filesystem this full is a warning; this full, a problem.
+const DISK_WARN_PERCENT = 80;
+const DISK_CRITICAL_PERCENT = 90;
+/* dandi/backup-status reports how full the DANDI Archive backup partitions on
+   MIT Engaging are, in its README (rewritten daily by the backup's
+   update_dashboard job). The Status page shows its Disk Space table. */
+const BACKUP_STATUS_REPO_URL = "https://github.com/dandi/backup-status";
+const BACKUP_STATUS_README_URL = "https://raw.githubusercontent.com/dandi/backup-status/main/README.md";
+// Always-on infrastructure jobs (the queue submitter, launcher/launch_submitter.sh
+// in dandi-compute-runner) that the dashboard leaves out of the snapshot so it
+// shows pipeline runs only. The Status page (?view=status) shows every job.
+const SQUEUE_INFRASTRUCTURE_JOB_NAMES = new Set(["DANDI-Compute-Submitter"]);
 // SLURM's compact job state codes, in the order the tally lists them.
 const SLURM_STATE_NAMES = {
     R: "running",
@@ -2107,16 +2131,16 @@ function zonedWallTimeToEpoch({ year, month, day, hour, minute, second }, timeZo
     return asUtc - offsetAt(asUtc - offsetAt(asUtc));
 }
 
-// The day branch the cluster records today's snapshots on.
-function monitorDayBranch(now = new Date()) {
+// The day branch the cluster records today's snapshots of `kind` on.
+function monitorDayBranch(now = new Date(), kind = SQUEUE_KIND) {
     const { year, month, day } = zonedDateParts(now, MONITOR_TIME_ZONE);
-    return `monitor/${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    return `${kind}/${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 // When a snapshot was taken, from its record name ("14/20261105T144502-squeue");
 // null when the name is not one.
-function squeueRecordTime(recordName) {
-    const match = SQUEUE_RECORD_PATTERN.exec(recordName ?? "");
+function monitorRecordTime(recordName) {
+    const match = MONITOR_RECORD_PATTERN.exec(recordName ?? "");
     if (!match) return null;
     const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
     return zonedWallTimeToEpoch({ year, month, day, hour, minute, second }, MONITOR_TIME_ZONE);
@@ -2130,56 +2154,64 @@ async function fetchGlobalLogsText(branch, path) {
     return resp.text();
 }
 
-// The day branch monitor/latest names, or null when it names none.
-async function pointedMonitorBranch() {
-    const pointed = (await fetchGlobalLogsText(MONITOR_POINTER_BRANCH, "LATEST"))?.trim();
-    return pointed && MONITOR_DAY_BRANCH_PATTERN.test(pointed) ? pointed : null;
+// The day branch {kind}/latest names, or null when it names none.
+async function pointedMonitorBranch(kind) {
+    const pointed = (await fetchGlobalLogsText(`${kind}/latest`, "LATEST"))?.trim();
+    return pointed && dayBranchPattern(kind).test(pointed) ? pointed : null;
 }
 
-// The newest monitor day branch on GitHub, by listing them; null when there is
-// none or the API cannot be reached. The answer is kept for 10 minutes so that
-// polling never spends the API's hourly allowance, and the request itself is
-// ETag-revalidated (a 304 does not count against it).
-let _newestMonitorBranch = null; // { branch, at }
-async function newestMonitorBranch(now = Date.now()) {
-    if (_newestMonitorBranch && now - _newestMonitorBranch.at < MONITOR_BRANCHES_TTL_MS) {
-        return _newestMonitorBranch.branch;
-    }
+// The newest day branch of `kind` on GitHub, by listing them; null when there
+// is none or the API cannot be reached. The answer is kept for 10 minutes so
+// that polling never spends the API's hourly allowance, and the request itself
+// is ETag-revalidated (a 304 does not count against it).
+const _newestMonitorBranch = new Map(); // kind → { branch, at }
+async function newestMonitorBranch(kind, now = Date.now()) {
+    const kept = _newestMonitorBranch.get(kind);
+    if (kept && now - kept.at < MONITOR_BRANCHES_TTL_MS) return kept.branch;
     let branch = null;
     try {
-        const resp = await cachedFetch(MONITOR_BRANCHES_URL);
+        const resp = await cachedFetch(monitorBranchesUrl(kind));
         const refs = resp.ok ? await resp.json() : [];
+        const pattern = dayBranchPattern(kind);
         const days = (Array.isArray(refs) ? refs : [])
             .map((ref) => String(ref?.ref ?? "").replace("refs/heads/", ""))
-            .filter((name) => MONITOR_DAY_BRANCH_PATTERN.test(name))
+            .filter((name) => pattern.test(name))
             .sort();
         branch = days.length > 0 ? days[days.length - 1] : null;
     } catch {
         /* offline, rate-limited or malformed: no branch */
     }
-    _newestMonitorBranch = { branch, at: now };
+    _newestMonitorBranch.set(kind, { branch, at: now });
     return branch;
 }
 
-// The newest squeue snapshot: from today's day branch when there is one, else
-// from the day branch monitor/latest names, else from the newest day branch
-// GitHub lists. Null when none of them leads to one.
-async function fetchLatestSqueueSnapshot(now = new Date()) {
-    let branch = monitorDayBranch(now);
-    let recordName = await fetchGlobalLogsText(branch, "monitor/LATEST");
-    const tried = new Set([branch]);
-    for (const findBranch of [pointedMonitorBranch, () => newestMonitorBranch(now.getTime())]) {
-        if (recordName !== null) break;
-        const found = await findBranch();
-        if (!found || tried.has(found)) continue;
-        tried.add(found);
-        const foundRecord = await fetchGlobalLogsText(found, "monitor/LATEST");
-        if (foundRecord !== null) [branch, recordName] = [found, foundRecord];
+// The newest snapshot of `kind` ("monitor" for squeue, "disk"): from today's
+// day branch when there is one, else from the day branch {kind}/latest names,
+// else from the newest day branch GitHub lists. Null when none of them leads
+// to one.
+async function fetchLatestMonitorSnapshot(kind, now = new Date()) {
+    const tried = new Set();
+    let found = null;
+    // Today's branch is known outright, so its lookup starts without waiting.
+    const candidates = [
+        monitorDayBranch(now, kind),
+        () => pointedMonitorBranch(kind),
+        () => newestMonitorBranch(kind, now.getTime()),
+    ];
+    for (const candidate of candidates) {
+        const branch = typeof candidate === "function" ? await candidate() : candidate;
+        if (!branch || tried.has(branch)) continue;
+        tried.add(branch);
+        const recordName = (await fetchGlobalLogsText(branch, `${kind}/LATEST`))?.trim();
+        if (recordName && MONITOR_RECORD_PATTERN.test(recordName)) {
+            found = { branch, recordName };
+            break;
+        }
     }
-    recordName = recordName?.trim();
-    if (!recordName || !SQUEUE_RECORD_PATTERN.test(recordName)) return null;
+    if (!found) return null;
 
-    const directory = `monitor/${recordName}`;
+    const { branch, recordName } = found;
+    const directory = `${kind}/${recordName}`;
     const [stdout, stderr, exitStatus] = await Promise.all([
         fetchGlobalLogsText(branch, `${directory}/stdout`),
         fetchGlobalLogsText(branch, `${directory}/stderr`).catch(() => null),
@@ -2188,13 +2220,16 @@ async function fetchLatestSqueueSnapshot(now = new Date()) {
     return {
         branch,
         recordName,
-        takenAt: squeueRecordTime(recordName),
+        takenAt: monitorRecordTime(recordName),
         stdout: stdout ?? "",
         stderr: stderr ?? "",
         exitStatus: exitStatus?.trim() || null,
         sourceUrl: `${GLOBAL_LOGS_REPO_URL}/blob/${branch}/${directory}/stdout`,
     };
 }
+
+const fetchLatestSqueueSnapshot = (now = new Date()) => fetchLatestMonitorSnapshot(SQUEUE_KIND, now);
+const fetchLatestDiskSnapshot = (now = new Date()) => fetchLatestMonitorSnapshot(DISK_KIND, now);
 
 // Job count and per-state tally, read from the ST column of squeue's
 // fixed-width table (its first line is the header). Null without that column.
@@ -2260,6 +2295,20 @@ function renderSqueueTally(stdout) {
     if (!summary || summary.states.length === 0) return "";
     const states = summary.states.map(([state, count]) => renderSlurmState(state, `${state} ${count}`)).join("");
     return `<span class="squeue-tally">${states}</span>`;
+}
+
+// squeue's output without the jobs named in `hiddenJobNames`, read from the
+// NAME column of its table. Output that does not parse as a table with a NAME
+// column is returned as it is.
+function hideSqueueJobs(stdout, hiddenJobNames) {
+    if (!hiddenJobNames || hiddenJobNames.size === 0) return stdout;
+    const text = squeueScreenText(stdout ?? "");
+    const table = text ? parseSqueueTable(text) : null;
+    const nameColumn = table ? table.columns.findIndex(({ label }) => label === "NAME") : -1;
+    if (nameColumn < 0) return stdout;
+    const lines = text.split("\n").filter((line) => line.trim() !== "");
+    const kept = lines.filter((line, index) => index === 0 || !hiddenJobNames.has(table.rows[index - 1][nameColumn]));
+    return kept.join("\n");
 }
 
 // squeue's fixed-width table as cells. squeue pads every field to its width
@@ -2339,17 +2388,20 @@ function renderSqueueOutput(snapshot) {
     return html;
 }
 
-// `snapshot` is undefined until the first load ends, null when no snapshot
-// was found, else what fetchLatestSqueueSnapshot returned; `error` is the
-// message of the last failed load, if it failed.
-function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now()) {
+// The terminal window around a monitor's output: its title bar (chips, then
+// the live/stale/error status, the snapshot's age, its branch) and its screen.
+// `snapshot` is undefined until the first load ends, null when no snapshot was
+// found, else what fetchLatestMonitorSnapshot returned; `error` is the message
+// of the last failed load, if it failed. `renderOutput` draws the snapshot's
+// screen and `renderChips` (optional) the chips in the bar.
+function renderMonitorFrame({ name, snapshot, error = null, now, staleAfterMs, renderOutput, renderChips = null }) {
     let status;
     let meta = "";
     let body = "";
     if (snapshot) {
-        // takenAt is always known: fetchLatestSqueueSnapshot only accepts record names it can date.
+        // takenAt is always known: fetchLatestMonitorSnapshot only accepts record names it can date.
         const age = now - snapshot.takenAt;
-        const stale = age > SQUEUE_STALE_AFTER_MS;
+        const stale = age > staleAfterMs;
         status = renderSqueueStatus(stale ? "stale" : "live", stale ? "stale" : "live");
         const takenAt = new Date(snapshot.takenAt);
         const exact = takenAt.toLocaleString(undefined, {
@@ -2364,93 +2416,344 @@ function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now()) 
         meta += `<time class="squeue-age" datetime="${e(takenAt.toISOString())}" title="Snapshot taken ${e(exact)}">${e(formatSnapshotAge(age))}</time>`;
         if (error) meta += `<span class="squeue-refresh-failed" title="${e(error)}">refresh failed</span>`;
         meta += `<a class="squeue-source" href="${e(snapshot.sourceUrl)}" target="_blank" rel="noopener">${e(snapshot.branch)} ↗</a>`;
-        body = renderSqueueOutput(snapshot);
+        body = renderOutput(snapshot);
     } else if (error) {
         status = renderSqueueStatus("error", "unavailable");
         body = `<pre class="squeue-text squeue-stderr">${e(error)}</pre>`;
     } else if (snapshot === null) {
         status = renderSqueueStatus("error", "no snapshots");
-        body = `<pre class="squeue-text squeue-stderr">No squeue snapshot found in dandi-compute-global-logs.</pre>`;
+        body = `<pre class="squeue-text squeue-stderr">No ${e(name)} snapshot found in dandi-compute-global-logs.</pre>`;
     } else {
         status = renderSqueueStatus("connecting", "connecting");
     }
 
-    const tally = snapshot ? renderSqueueTally(snapshot.stdout) : "";
+    const chips = snapshot && renderChips ? renderChips(snapshot) : "";
     return `
 <div class="squeue-bar">
     <span class="squeue-dots" aria-hidden="true"><span></span><span></span><span></span></span>
-    ${tally}
+    ${chips}
     <span class="squeue-bar-spacer"></span>
     ${status}${meta}
 </div>
 <div class="squeue-screen" tabindex="0">${body}</div>`;
 }
 
-let _squeueMonitorState = { snapshot: undefined, error: null };
-let _squeueMonitorRefresh = null; // the load in flight, so polls never overlap
-let _squeueMonitorTimer = null;
-
-// Insert the monitor at the very top of the page content (once).
-function mountSqueueMonitor() {
-    let el = document.getElementById("squeue-monitor");
-    if (el) return el;
-    const pageContent = document.querySelector(".page-content");
-    if (!pageContent) return null;
-    el = document.createElement("section");
-    el.id = "squeue-monitor";
-    el.className = "squeue-monitor";
-    el.setAttribute("aria-label", "Latest squeue snapshot from MIT Engaging");
-    pageContent.insertBefore(el, pageContent.firstChild);
-    return el;
-}
-
-// Load the newest snapshot and redraw. A failed load keeps the last snapshot
-// on screen and says the refresh failed.
-function refreshSqueueMonitor() {
-    if (_squeueMonitorRefresh) return _squeueMonitorRefresh;
-    _squeueMonitorRefresh = (async () => {
-        try {
-            _squeueMonitorState = { snapshot: await fetchLatestSqueueSnapshot(), error: null };
-        } catch (err) {
-            _squeueMonitorState = {
-                snapshot: _squeueMonitorState.snapshot,
-                error: `Could not load the latest squeue snapshot: ${err.message || err}`,
-            };
-        }
-        const el = mountSqueueMonitor();
-        if (el) el.innerHTML = renderSqueueMonitor(_squeueMonitorState);
-    })().finally(() => {
-        _squeueMonitorRefresh = null;
+// The squeue monitor. Jobs named in `hiddenJobNames` are left out of the
+// table and the tally.
+function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now(), { hiddenJobNames = null } = {}) {
+    if (snapshot && hiddenJobNames) snapshot = { ...snapshot, stdout: hideSqueueJobs(snapshot.stdout, hiddenJobNames) };
+    return renderMonitorFrame({
+        name: "squeue",
+        snapshot,
+        error,
+        now,
+        staleAfterMs: SQUEUE_STALE_AFTER_MS,
+        renderOutput: renderSqueueOutput,
+        renderChips: (shown) => renderSqueueTally(shown.stdout),
     });
-    return _squeueMonitorRefresh;
 }
 
-// Show the monitor and keep it current, polling while the tab is visible and
-// catching up as soon as it is shown again.
-function initSqueueMonitor() {
-    const el = mountSqueueMonitor();
-    if (!el) return Promise.resolve();
-    el.innerHTML = renderSqueueMonitor(_squeueMonitorState);
-    if (_squeueMonitorTimer === null) {
-        _squeueMonitorTimer = setInterval(() => {
-            if (document.visibilityState !== "hidden") refreshSqueueMonitor();
-        }, SQUEUE_POLL_INTERVAL_MS);
-        document.addEventListener("visibilitychange", onSqueueMonitorVisibilityChange);
+/* ─── Disk usage monitor (the Status page) ──────────────────── */
+
+// How full a filesystem is, from its Use% cell ("23%"); null when the cell is
+// not a percentage.
+function parseUsePercent(cell) {
+    const match = /^(\d+(?:\.\d+)?)%$/.exec((cell ?? "").trim());
+    return match ? Number(match[1]) : null;
+}
+
+// How a usage percentage is coloured: fine, a warning, or critical.
+function diskUsageKind(percent) {
+    if (percent === null || !Number.isFinite(percent)) return "unknown";
+    if (percent >= DISK_CRITICAL_PERCENT) return "critical";
+    if (percent >= DISK_WARN_PERCENT) return "warn";
+    return "ok";
+}
+
+function renderUsePercent(cell) {
+    const percent = parseUsePercent(cell);
+    if (percent === null) return e(cell);
+    const kind = diskUsageKind(percent);
+    const label = {
+        ok: "under " + DISK_WARN_PERCENT + "% full",
+        warn: "over " + DISK_WARN_PERCENT + "% full",
+        critical: "over " + DISK_CRITICAL_PERCENT + "% full",
+    }[kind];
+    return `<span class="disk-pct disk-pct-${kind}" title="${e(label)}">${e(cell)}</span>`;
+}
+
+// The disk snapshot's screen: each blank-line-separated block of its output as
+// a table (the df table, then the du line), with the Use% column coloured by
+// how full the filesystem is, or as plain text when it does not parse as one.
+function renderDiskOutput(snapshot) {
+    let html = "";
+    const stdout = squeueScreenText(snapshot.stdout);
+    const blocks = stdout ? stdout.split(/\n{2,}/) : [];
+    for (const block of blocks) {
+        // A lone line (an error message) is text, not a header without rows.
+        const table = block.includes("\n") ? parseSqueueTable(block) : null;
+        if (!table) {
+            html += `<pre class="squeue-text">${e(block)}</pre>`;
+            continue;
+        }
+        const percentColumn = table.columns.findIndex(({ label }) => label === "Use%");
+        const numeric = (column) => (column.right ? ' class="squeue-num"' : "");
+        const head = table.columns
+            .map((column) => `<th scope="col"${numeric(column)}>${e(column.label)}</th>`)
+            .join("");
+        const body = table.rows
+            .map((row) => {
+                const cells = row.map((cell, index) => {
+                    const content = index === percentColumn ? renderUsePercent(cell) : e(cell);
+                    return `<td${numeric(table.columns[index])}>${content}</td>`;
+                });
+                return `<tr>${cells.join("")}</tr>`;
+            })
+            .join("");
+        html += `<table class="squeue-table disk-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
     }
-    return refreshSqueueMonitor();
+    const messages = [];
+    const stderr = squeueScreenText(snapshot.stderr);
+    if (stderr) messages.push(e(stderr));
+    if (snapshot.exitStatus && snapshot.exitStatus !== "0") messages.push(`[exit status ${e(snapshot.exitStatus)}]`);
+    if (messages.length > 0) html += `<pre class="squeue-text squeue-stderr">${messages.join("\n")}</pre>`;
+    return html;
 }
 
-function onSqueueMonitorVisibilityChange() {
-    if (document.visibilityState === "visible") refreshSqueueMonitor();
+// One chip per filesystem in the title bar: its mount point and how full it is.
+function renderDiskChips(snapshot) {
+    const stdout = squeueScreenText(snapshot.stdout);
+    const table = stdout ? parseSqueueTable(stdout.split(/\n{2,}/)[0]) : null;
+    if (!table) return "";
+    const mountColumn = table.columns.findIndex(({ label }) => label === "Mounted");
+    const percentColumn = table.columns.findIndex(({ label }) => label === "Use%");
+    if (mountColumn < 0 || percentColumn < 0) return "";
+    const chips = table.rows
+        .filter((row) => parseUsePercent(row[percentColumn]) !== null)
+        .map((row) => {
+            const kind = diskUsageKind(parseUsePercent(row[percentColumn]));
+            return `<span class="disk-pct disk-pct-${kind}" title="${e(row[mountColumn])}">${e(row[mountColumn])} ${e(row[percentColumn])}</span>`;
+        });
+    return chips.length > 0 ? `<span class="squeue-tally">${chips.join("")}</span>` : "";
 }
 
-// Stop polling and forget the last snapshot (tests).
-function stopSqueueMonitor() {
-    if (_squeueMonitorTimer !== null) clearInterval(_squeueMonitorTimer);
-    _squeueMonitorTimer = null;
-    document.removeEventListener("visibilitychange", onSqueueMonitorVisibilityChange);
-    _squeueMonitorState = { snapshot: undefined, error: null };
-    _newestMonitorBranch = null;
+function renderDiskMonitor({ snapshot, error = null } = {}, now = Date.now()) {
+    return renderMonitorFrame({
+        name: "disk",
+        snapshot,
+        error,
+        now,
+        staleAfterMs: DISK_STALE_AFTER_MS,
+        renderOutput: renderDiskOutput,
+        renderChips: renderDiskChips,
+    });
+}
+
+// A monitor widget: the latest snapshot of `kind` (named `name` on screen)
+// drawn by `render`, kept
+// current by polling while the tab is visible and catching up as soon as it
+// is shown again. `init(options)` mounts it (once) and starts polling;
+// `options.container` is the element it is mounted in (default: the top of
+// the page content) and the rest is passed to `render`. A failed load keeps
+// the last snapshot on screen and says the refresh failed.
+function createMonitorWidget({ kind, name, elementId, ariaLabel, render, pollIntervalMs }) {
+    let state = { snapshot: undefined, error: null };
+    let options = {};
+    let refreshing = null; // the load in flight, so polls never overlap
+    let timer = null;
+
+    function mount() {
+        let el = document.getElementById(elementId);
+        if (el) return el;
+        const container = options.container ?? document.querySelector(".page-content");
+        if (!container) return null;
+        el = document.createElement("section");
+        el.id = elementId;
+        el.className = "squeue-monitor";
+        el.setAttribute("aria-label", ariaLabel);
+        container.insertBefore(el, options.container ? null : container.firstChild);
+        return el;
+    }
+
+    function draw() {
+        const el = mount();
+        if (el) el.innerHTML = render(state, Date.now(), options);
+        return el;
+    }
+
+    function refresh() {
+        if (refreshing) return refreshing;
+        refreshing = (async () => {
+            try {
+                state = { snapshot: await fetchLatestMonitorSnapshot(kind), error: null };
+            } catch (err) {
+                state = {
+                    snapshot: state.snapshot,
+                    error: `Could not load the latest ${name} snapshot: ${err.message || err}`,
+                };
+            }
+            draw();
+        })().finally(() => {
+            refreshing = null;
+        });
+        return refreshing;
+    }
+
+    function onVisibilityChange() {
+        if (document.visibilityState === "visible") refresh();
+    }
+
+    function init({ container = null, ...rest } = {}) {
+        options = { container, ...rest };
+        if (!draw()) return Promise.resolve();
+        if (timer === null) {
+            timer = setInterval(() => {
+                if (document.visibilityState !== "hidden") refresh();
+            }, pollIntervalMs);
+            document.addEventListener("visibilitychange", onVisibilityChange);
+        }
+        return refresh();
+    }
+
+    // Stop polling and forget the last snapshot (tests).
+    function stop() {
+        if (timer !== null) clearInterval(timer);
+        timer = null;
+        document.removeEventListener("visibilitychange", onVisibilityChange);
+        state = { snapshot: undefined, error: null };
+        options = {};
+    }
+
+    return { init, refresh, stop };
+}
+
+const squeueMonitor = createMonitorWidget({
+    kind: SQUEUE_KIND,
+    name: "squeue",
+    elementId: "squeue-monitor",
+    ariaLabel: "Latest squeue snapshot from MIT Engaging",
+    render: renderSqueueMonitor,
+    pollIntervalMs: SQUEUE_POLL_INTERVAL_MS,
+});
+const diskMonitor = createMonitorWidget({
+    kind: DISK_KIND,
+    name: "disk",
+    elementId: "disk-monitor",
+    ariaLabel: "Latest disk usage snapshot from MIT Engaging",
+    render: renderDiskMonitor,
+    pollIntervalMs: DISK_POLL_INTERVAL_MS,
+});
+
+// `hiddenJobNames` are left out of what the squeue monitor shows.
+const initSqueueMonitor = (options) => squeueMonitor.init(options);
+const refreshSqueueMonitor = () => squeueMonitor.refresh();
+const initDiskMonitor = (options) => diskMonitor.init(options);
+const refreshDiskMonitor = () => diskMonitor.refresh();
+
+// Stop every monitor and forget the branch listing (tests).
+function stopMonitors() {
+    squeueMonitor.stop();
+    diskMonitor.stop();
+    _newestMonitorBranch.clear();
+}
+
+/* ─── DANDI Archive backup partitions (the Status page) ─────── */
+
+// The backup-status README's "Last update" line and Disk Space table:
+// { updated, partitions: [{ name, used, total, percent }] }. Partitions are
+// empty when the README has no such table. Read line by line: the README is
+// fetched from another repository, so nothing here backtracks on its input.
+const BACKUP_SIZE_CELL_PATTERN = /^(\d[\d.]* [A-Za-z]+) \/ (\d[\d.]* [A-Za-z]+) \((\d+(?:\.\d+)?)%\)$/;
+function parseBackupStatus(markdown) {
+    let updated = null;
+    const partitions = [];
+    let inDiskSpace = false;
+    for (const rawLine of String(markdown ?? "").split("\n")) {
+        const line = rawLine.trim();
+        if (updated === null && line.startsWith("Last update:")) {
+            updated = line.slice("Last update:".length).trim() || null;
+            continue;
+        }
+        if (line.startsWith("#")) {
+            inDiskSpace = line.replace(/\s+/g, " ") === "## Disk Space";
+            continue;
+        }
+        if (!inDiskSpace || !line.startsWith("|")) continue;
+        const cells = line.split("|").map((cell) => cell.trim());
+        // "| 001 | 791.56 TB / 967.57 TB (81.81%) |" splits into "", name, sizes, "".
+        const sizes = BACKUP_SIZE_CELL_PATTERN.exec(cells[2] ?? "");
+        if (!cells[1] || !sizes) continue;
+        partitions.push({ name: cells[1], used: sizes[1], total: sizes[2], percent: Number(sizes[3]) });
+    }
+    return { updated, partitions };
+}
+
+// The partitions as meters: the name, a bar as full as the partition, and
+// the used / total sizes with the percentage, coloured like the disk snapshot.
+function renderBackupStatus({ status = undefined, error = null } = {}) {
+    const title = `<a href="${BACKUP_STATUS_REPO_URL}" target="_blank" rel="noopener">dandi/backup-status</a>`;
+    let body;
+    if (error) {
+        body = `<p class="backup-status-note backup-status-error">${e(error)}</p>`;
+    } else if (status === undefined) {
+        body = `<p class="backup-status-note">Loading…</p>`;
+    } else if (status.partitions.length === 0) {
+        body = `<p class="backup-status-note">No Disk Space table found in the README.</p>`;
+    } else {
+        body = status.partitions
+            .map(({ name, used, total, percent }) => {
+                const kind = diskUsageKind(percent);
+                const width = Math.max(0, Math.min(100, percent));
+                return `
+<div class="disk-meter disk-meter-${kind}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${e(percent)}" aria-label="Partition ${e(name)}: ${e(percent)}% full">
+    <span class="disk-meter-name">${e(name)}</span>
+    <span class="disk-meter-bar"><span class="disk-meter-fill" style="width: ${width}%"></span></span>
+    <span class="disk-meter-text">${e(used)} / ${e(total)}</span>
+    <span class="disk-pct disk-pct-${kind}">${e(percent)}%</span>
+</div>`;
+            })
+            .join("");
+    }
+    const updated = status?.updated
+        ? `<span class="backup-status-updated">Last update: ${e(status.updated)}</span>`
+        : "";
+    return `
+<div class="backup-status-head">
+    <span class="backup-status-title">DANDI Archive backup partitions</span>
+    <span class="backup-status-source">${updated} ${title} ↗</span>
+</div>
+${body}`;
+}
+
+// Fetch the README once and draw the partitions into `el`. Resolves when drawn.
+async function loadBackupStatus(el) {
+    if (!el) return;
+    el.innerHTML = renderBackupStatus();
+    try {
+        const resp = await fetch(BACKUP_STATUS_README_URL);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        el.innerHTML = renderBackupStatus({ status: parseBackupStatus(await resp.text()) });
+    } catch (err) {
+        el.innerHTML = renderBackupStatus({ error: `Could not load dandi/backup-status: ${err.message || err}` });
+    }
+}
+
+/* ─── Status page ───────────────────────────────────────────── */
+function renderStatusPage() {
+    return `
+<div class="status-page">
+    <section class="status-section" aria-labelledby="status-queue-heading">
+        <h2 class="status-heading" id="status-queue-heading">Queue</h2>
+        <p class="status-note">Every DANDI Compute job on MIT Engaging, including the always-on queue submitter, as of the latest <code>squeue</code> snapshot (taken every 5 minutes).</p>
+        <div id="status-queue"></div>
+    </section>
+    <section class="status-section" aria-labelledby="status-disk-heading">
+        <h2 class="status-heading" id="status-disk-heading">Disk</h2>
+        <p class="status-note">How full the home and DANDI project filesystems are, and the home directory's own usage, as of the latest disk snapshot (taken every 30 minutes), after the DANDI Archive backup partitions as dandi/backup-status reports them daily.</p>
+        <div id="backup-status" class="backup-status"></div>
+        <div id="status-disk"></div>
+    </section>
+</div>`;
 }
 
 /* Log files rendered as always-open inline iframes (not modal buttons) */
@@ -6572,6 +6875,19 @@ async function init() {
             'Open a successful run\'s postprocessed spike sorting in <a href="https://github.com/SpikeInterface/spikeinterface-gui" target="_blank" rel="noopener">SpikeInterface GUI</a>, streamed directly from the DANDI Archive.'
         );
     }
+    if (_viewMode === "status") {
+        setPageCopy(
+            "Cluster Status",
+            `The queue and the disks on MIT Engaging, from the snapshots the runner records to <a href="${GLOBAL_LOGS_REPO_URL}" target="_blank" rel="noopener">dandi-compute-global-logs</a> and from <a href="${BACKUP_STATUS_REPO_URL}" target="_blank" rel="noopener">dandi/backup-status</a>.`
+        );
+        // Nothing else to load: the monitors are the page.
+        document.getElementById("runs").innerHTML = renderStatusPage();
+        showDiffResults();
+        initSqueueMonitor({ container: document.getElementById("status-queue") });
+        initDiskMonitor({ container: document.getElementById("status-disk") });
+        loadBackupStatus(document.getElementById("backup-status"));
+        return;
+    }
     if (_viewMode === "archive") {
         setPageCopy(
             "Archived Pipeline Runs",
@@ -6634,8 +6950,9 @@ async function init() {
         }
         return;
     }
-    // The live squeue snapshot heads the dashboard, above the page title.
-    if (_viewMode === "dashboard") initSqueueMonitor();
+    // The live squeue snapshot heads the dashboard, above the page title, with
+    // the always-on infrastructure jobs left out (the Status page shows them).
+    if (_viewMode === "dashboard") initSqueueMonitor({ hiddenJobNames: SQUEUE_INFRASTRUCTURE_JOB_NAMES });
     // Top display of current queue scheduling priorities. Irrelevant to the
     // archive page, which shows already-completed (failed) runs.
     if (_viewMode !== "archive") initQueuePriorities();
@@ -6674,12 +6991,23 @@ if (typeof module !== "undefined" && module.exports) {
         updateRunCard,
         fetchArchiveState,
         fetchLatestSqueueSnapshot,
+        fetchLatestDiskSnapshot,
+        fetchLatestMonitorSnapshot,
+        hideSqueueJobs,
         initSqueueMonitor,
+        initDiskMonitor,
+        SQUEUE_INFRASTRUCTURE_JOB_NAMES,
         monitorDayBranch,
+        monitorRecordTime,
         refreshSqueueMonitor,
+        refreshDiskMonitor,
         renderSqueueMonitor,
-        squeueRecordTime,
-        stopSqueueMonitor,
+        renderDiskMonitor,
+        parseBackupStatus,
+        renderBackupStatus,
+        loadBackupStatus,
+        renderStatusPage,
+        stopMonitors,
         summarizeSqueueJobs,
         archiveStateCacheKey,
         fetchSlurmLogs,

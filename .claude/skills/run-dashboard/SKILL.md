@@ -36,11 +36,16 @@ open it in Chromium, and stub the external endpoints at the network boundary.
     - `https://dandiarchive.s3.amazonaws.com/dandisets/001873/draft/assets.jsonld` — same
       two-hop lookup, archive Dandiset (archive view).
     - `https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads/...` —
-      the live squeue terminal atop `?view=dashboard` (polled every minute). It reads
-      `monitor/<today, US Eastern>/monitor/LATEST`, falling back on a 404 to
-      `monitor/latest/LATEST` (the newest day branch's name) and that branch's `monitor/LATEST`,
-      then `monitor/<record>/{stdout,stderr,exit_status}`. Unstubbed, it 404s into a
+      the live squeue terminal atop `?view=dashboard` (polled every minute) and, on
+      `?view=status`, that terminal plus the disk usage one (polled every 5 minutes). Each kind
+      (`monitor` for squeue, `disk`) reads `<kind>/<today, US Eastern>/<kind>/LATEST`, falling
+      back on a 404 to `<kind>/latest/LATEST` (the newest day branch's name) and that branch's
+      `<kind>/LATEST`, then `<kind>/<record>/{stdout,stderr,exit_status}` (records are
+      `HH/YYYYMMDDTHHMMSS-squeue` and `HH/YYYYMMDDTHHMMSS-usage`). Unstubbed, they 404 into a
       "no snapshots" terminal without affecting the rest of the page.
+    - `https://raw.githubusercontent.com/dandi/backup-status/main/README.md` — the DANDI Archive
+      backup partitions on `?view=status`, read from the README's `## Disk Space` table
+      (`| 001 | 791.56 TB / 967.57 TB (81.81%) |` rows) and its `Last update:` line.
     - `.../code/main/src/dandi_compute_code/queue/pipeline_configs.json` — priorities banner.
     - `.../code/main/...registered_params.json` / `registered_configs.json` — registries.
     - `https://dandiarchive.s3.amazonaws.com/blobs/<3>/<3>/<id>` — per-run artifacts
