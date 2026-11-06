@@ -17,7 +17,9 @@ const {
     isImmutableBlobUrl,
     fetchArchiveState,
     fetchLatestSqueueSnapshot,
+    hideSqueueJobs,
     initSqueueMonitor,
+    SQUEUE_INFRASTRUCTURE_JOB_NAMES,
     monitorDayBranch,
     refreshSqueueMonitor,
     renderSqueueMonitor,
@@ -197,6 +199,8 @@ describe("app unit behavior", () => {
         expect(parseViewMode()).toBe("archive");
         window.history.replaceState(null, "", "/?view=curation");
         expect(parseViewMode()).toBe("curation");
+        window.history.replaceState(null, "", "/?view=status");
+        expect(parseViewMode()).toBe("status");
         window.history.replaceState(null, "", "/?view=bogus");
         expect(parseViewMode()).toBe(null);
         window.history.replaceState(null, "", "/");
@@ -211,6 +215,7 @@ describe("app unit behavior", () => {
                 <a class="site-tests-link site-view-toggle-link" href="?view=tests"></a>
                 <a class="site-diffs-link site-view-toggle-link" href="?view=compare"></a>
                 <a class="site-params-link site-view-toggle-link" href="?view=params"></a>
+                <a class="site-status-link site-view-toggle-link" href="?view=status"></a>
             </nav>
         `;
 
@@ -222,6 +227,12 @@ describe("app unit behavior", () => {
         expect(document.querySelector(".site-diffs-link").classList.contains("active")).toBe(true);
         expect(document.querySelector(".site-diffs-link").getAttribute("aria-current")).toBe("page");
         expect(document.querySelector(".site-params-link").classList.contains("active")).toBe(false);
+        expect(document.querySelector(".site-status-link").classList.contains("active")).toBe(false);
+
+        syncTopNav("status");
+        expect(document.querySelector(".site-status-link").classList.contains("active")).toBe(true);
+        expect(document.querySelector(".site-status-link").getAttribute("aria-current")).toBe("page");
+        expect(document.querySelector(".site-diffs-link").classList.contains("active")).toBe(false);
     });
 
     it("marks welcome top nav link as active when no view is selected", () => {
@@ -4475,6 +4486,103 @@ describe("live squeue monitor", () => {
             "unavailable",
             "Could not load <it>",
         ]);
+    });
+
+    it("hides the infrastructure jobs by the NAME column and leaves other output alone", () => {
+        expect(SQUEUE_INFRASTRUCTURE_JOB_NAMES.has("DANDI-Compute-Submitter")).toBe(true);
+        const hidden = hideSqueueJobs(SQUEUE_STDOUT, SQUEUE_INFRASTRUCTURE_JOB_NAMES);
+        const lines = hidden.split("\n");
+        expect(lines).toHaveLength(3);
+        expect(lines[0]).toBe(SQUEUE_HEADER.trimEnd());
+        expect(hidden).not.toContain("DANDI-Compute-Submitter");
+        expect(hidden).toContain("aind <ephys>");
+        expect(hidden).toContain("aind-ephys");
+        // Only an exact name matches; a pipeline job is never a submitter.
+        expect(hideSqueueJobs(SQUEUE_STDOUT, new Set(["aind"]))).toBe(squeueScreenTextOf(SQUEUE_STDOUT));
+        // Nothing to hide, or output that is not a table with a NAME column, passes through.
+        expect(hideSqueueJobs(SQUEUE_STDOUT, null)).toBe(SQUEUE_STDOUT);
+        expect(hideSqueueJobs(SQUEUE_STDOUT, new Set())).toBe(SQUEUE_STDOUT);
+        expect(hideSqueueJobs("JOBID STATE\n12 running late\n", SQUEUE_INFRASTRUCTURE_JOB_NAMES)).toBe(
+            "JOBID STATE\n12 running late\n"
+        );
+        expect(hideSqueueJobs("", SQUEUE_INFRASTRUCTURE_JOB_NAMES)).toBe("");
+        // Hiding the only job leaves the header, which renders as an empty queue.
+        const onlySubmitter = [
+            SQUEUE_HEADER,
+            squeueLine("1", "p", "DANDI-Compute-Submitter", "R", "0:52", "1", "1", "1G", "node1409"),
+        ].join("\n");
+        expect(hideSqueueJobs(onlySubmitter, SQUEUE_INFRASTRUCTURE_JOB_NAMES)).toBe(SQUEUE_HEADER.trimEnd());
+    });
+    const squeueScreenTextOf = (text) =>
+        text
+            .split("\n")
+            .map((l) => l.trimEnd())
+            .join("\n")
+            .replace(/\n+$/, "");
+
+    it("renders the dashboard snapshot without the submitter but the Status page with it", () => {
+        const snapshot = {
+            branch: "monitor/2026-11-05",
+            recordName: "14/20261105T144502-squeue",
+            takenAt: Date.parse("2026-11-05T19:45:02Z"),
+            stdout: SQUEUE_STDOUT,
+            stderr: "",
+            exitStatus: "0",
+            sourceUrl: "https://example.org/stdout",
+        };
+        const dashboard = document.createElement("div");
+        dashboard.innerHTML = renderSqueueMonitor({ snapshot }, NOW.getTime(), {
+            hiddenJobNames: SQUEUE_INFRASTRUCTURE_JOB_NAMES,
+        });
+        const names = (root) => [...root.querySelectorAll("tbody tr")].map((tr) => tr.cells[2].textContent);
+        expect(names(dashboard)).toEqual(["aind <ephys>", "aind-ephys"]);
+        // The tally counts only what is shown.
+        expect([...dashboard.querySelectorAll(".squeue-tally .squeue-st")].map((chip) => chip.textContent)).toEqual([
+            "R 1",
+            "PD 1",
+        ]);
+        // The snapshot itself is untouched, so a later unfiltered draw still has every job.
+        expect(snapshot.stdout).toBe(SQUEUE_STDOUT);
+
+        const status = document.createElement("div");
+        status.innerHTML = renderSqueueMonitor({ snapshot }, NOW.getTime());
+        expect(names(status)).toEqual(["DANDI-Compute-Submitter", "aind <ephys>", "aind-ephys"]);
+        expect([...status.querySelectorAll(".squeue-tally .squeue-st")].map((chip) => chip.textContent)).toEqual([
+            "R 2",
+            "PD 1",
+        ]);
+    });
+
+    it("mounts into a given container with every job shown (the Status page)", async () => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+        vi.setSystemTime(NOW);
+        document.body.innerHTML = `<div class="page-content"><h1>Cluster Status</h1><div id="runs"></div></div>`;
+        global.fetch = serveGlobalLogs({ "monitor/2026-11-05": snapshotFiles("14/20261105T144502-squeue") });
+
+        await initSqueueMonitor({ container: document.getElementById("runs") });
+        const monitor = document.getElementById("squeue-monitor");
+        expect(monitor.parentElement).toBe(document.getElementById("runs"));
+        expect(document.querySelector(".page-content").firstElementChild.tagName).toBe("H1");
+        expect(monitor.querySelector(".squeue-status").textContent).toBe("live");
+        expect(monitor.querySelectorAll("tbody tr")).toHaveLength(3);
+        expect(monitor.querySelector(".squeue-screen").textContent).toContain("DANDI-Compute-Submitter");
+    });
+
+    it("hides the submitter on the dashboard across refreshes", async () => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+        vi.setSystemTime(NOW);
+        document.body.innerHTML = `<div class="page-content"><h1>AIND Ephys Pipeline Results</h1></div>`;
+        global.fetch = serveGlobalLogs({ "monitor/2026-11-05": snapshotFiles("14/20261105T144502-squeue") });
+
+        await initSqueueMonitor({ hiddenJobNames: SQUEUE_INFRASTRUCTURE_JOB_NAMES });
+        const monitor = document.getElementById("squeue-monitor");
+        expect(document.querySelector(".page-content").firstElementChild).toBe(monitor);
+        expect(monitor.querySelectorAll("tbody tr")).toHaveLength(2);
+        expect(monitor.querySelector(".squeue-screen").textContent).not.toContain("DANDI-Compute-Submitter");
+
+        await refreshSqueueMonitor();
+        expect(monitor.querySelectorAll("tbody tr")).toHaveLength(2);
+        expect(monitor.querySelector(".squeue-screen").textContent).not.toContain("DANDI-Compute-Submitter");
     });
 
     it("does nothing on a page without the page content container", async () => {

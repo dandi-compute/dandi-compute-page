@@ -71,8 +71,8 @@ const TEST_DANDISETS = new Set(["001849"]);
 /* Per-dandiset fallback subject used when a queue entry carries a null subject */
 const DANDISET_SUBJECT_DEFAULTS = new Map([["001849", "test"]]);
 
-/* Module-level view mode ("tests" | "archive" | "compare" | "params" | null),
-   set during init */
+/* Module-level view mode ("dashboard" | "compare" | "params" | "curation" |
+   "tests" | "archive" | "status" | null), set during init */
 let _viewMode = null;
 
 /* Module-level layout mode ("tree" | "flat"), toggled by the layout bar */
@@ -94,7 +94,7 @@ let _openGroupKeys = new Set();
 const FLAT_RENDER_CHUNK = 200;
 let _flatRenderLimit = FLAT_RENDER_CHUNK;
 
-const ALLOWED_VIEW_MODES = new Set(["dashboard", "compare", "params", "curation", "tests", "archive"]);
+const ALLOWED_VIEW_MODES = new Set(["dashboard", "compare", "params", "curation", "tests", "archive", "status"]);
 
 function parseViewMode() {
     const rawView = new URLSearchParams(window.location.search).get("view");
@@ -110,6 +110,7 @@ function syncTopNav(viewMode = parseViewMode()) {
         { selector: '.site-view-toggle-link[href="?view=curation"]', mode: "curation" },
         { selector: '.site-view-toggle-link[href="?view=tests"]', mode: "tests" },
         { selector: '.site-view-toggle-link[href="?view=archive"]', mode: "archive" },
+        { selector: '.site-view-toggle-link[href="?view=status"]', mode: "status" },
     ];
     navLinks.forEach(({ selector, mode }) => {
         const link = document.querySelector(selector);
@@ -2031,7 +2032,7 @@ async function initQueuePriorities() {
     el.style.display = "";
 }
 
-/* ─── Live squeue monitor (top of the dashboard) ────────────── */
+/* ─── Live squeue monitor (top of the dashboard; the Status page) ── */
 /* The runner snapshots the cluster queue (`squeue --me`) every 5 minutes into
    dandi-compute/dandi-compute-global-logs (launcher/record.sh in
    dandi-compute-runner). Each snapshot lands on that day's `monitor/YYYY-MM-DD`
@@ -2058,6 +2059,10 @@ const SQUEUE_RECORD_PATTERN = /^\d{2}\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2
 const SQUEUE_POLL_INTERVAL_MS = 60 * 1000;
 // Three missed 5-minute snapshots mark the view stale.
 const SQUEUE_STALE_AFTER_MS = 15 * 60 * 1000;
+// Always-on infrastructure jobs (the queue submitter, launcher/launch_submitter.sh
+// in dandi-compute-runner) that the dashboard leaves out of the snapshot so it
+// shows pipeline runs only. The Status page (?view=status) shows every job.
+const SQUEUE_INFRASTRUCTURE_JOB_NAMES = new Set(["DANDI-Compute-Submitter"]);
 // SLURM's compact job state codes, in the order the tally lists them.
 const SLURM_STATE_NAMES = {
     R: "running",
@@ -2262,6 +2267,20 @@ function renderSqueueTally(stdout) {
     return `<span class="squeue-tally">${states}</span>`;
 }
 
+// squeue's output without the jobs named in `hiddenJobNames`, read from the
+// NAME column of its table. Output that does not parse as a table with a NAME
+// column is returned as it is.
+function hideSqueueJobs(stdout, hiddenJobNames) {
+    if (!hiddenJobNames || hiddenJobNames.size === 0) return stdout;
+    const text = squeueScreenText(stdout ?? "");
+    const table = text ? parseSqueueTable(text) : null;
+    const nameColumn = table ? table.columns.findIndex(({ label }) => label === "NAME") : -1;
+    if (nameColumn < 0) return stdout;
+    const lines = text.split("\n").filter((line) => line.trim() !== "");
+    const kept = lines.filter((line, index) => index === 0 || !hiddenJobNames.has(table.rows[index - 1][nameColumn]));
+    return kept.join("\n");
+}
+
 // squeue's fixed-width table as cells. squeue pads every field to its width
 // and separates fields by a space, so the columns are the runs of positions
 // that are not blank on every line. A column is right-aligned when every
@@ -2341,11 +2360,13 @@ function renderSqueueOutput(snapshot) {
 
 // `snapshot` is undefined until the first load ends, null when no snapshot
 // was found, else what fetchLatestSqueueSnapshot returned; `error` is the
-// message of the last failed load, if it failed.
-function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now()) {
+// message of the last failed load, if it failed. Jobs named in
+// `hiddenJobNames` are left out of the table and the tally.
+function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now(), { hiddenJobNames = null } = {}) {
     let status;
     let meta = "";
     let body = "";
+    if (snapshot && hiddenJobNames) snapshot = { ...snapshot, stdout: hideSqueueJobs(snapshot.stdout, hiddenJobNames) };
     if (snapshot) {
         // takenAt is always known: fetchLatestSqueueSnapshot only accepts record names it can date.
         const age = now - snapshot.takenAt;
@@ -2389,18 +2410,28 @@ function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now()) 
 let _squeueMonitorState = { snapshot: undefined, error: null };
 let _squeueMonitorRefresh = null; // the load in flight, so polls never overlap
 let _squeueMonitorTimer = null;
+// How the mounted monitor draws: the jobs it hides (a Set of names, or null for
+// none) and the element it lives in (null: the top of the page content).
+let _squeueMonitorOptions = { hiddenJobNames: null, container: null };
 
-// Insert the monitor at the very top of the page content (once).
+function drawSqueueMonitor() {
+    const el = mountSqueueMonitor();
+    if (el) el.innerHTML = renderSqueueMonitor(_squeueMonitorState, Date.now(), _squeueMonitorOptions);
+    return el;
+}
+
+// Insert the monitor (once): into the configured container, else at the very
+// top of the page content.
 function mountSqueueMonitor() {
     let el = document.getElementById("squeue-monitor");
     if (el) return el;
-    const pageContent = document.querySelector(".page-content");
-    if (!pageContent) return null;
+    const container = _squeueMonitorOptions.container ?? document.querySelector(".page-content");
+    if (!container) return null;
     el = document.createElement("section");
     el.id = "squeue-monitor";
     el.className = "squeue-monitor";
     el.setAttribute("aria-label", "Latest squeue snapshot from MIT Engaging");
-    pageContent.insertBefore(el, pageContent.firstChild);
+    container.insertBefore(el, _squeueMonitorOptions.container ? null : container.firstChild);
     return el;
 }
 
@@ -2417,8 +2448,7 @@ function refreshSqueueMonitor() {
                 error: `Could not load the latest squeue snapshot: ${err.message || err}`,
             };
         }
-        const el = mountSqueueMonitor();
-        if (el) el.innerHTML = renderSqueueMonitor(_squeueMonitorState);
+        drawSqueueMonitor();
     })().finally(() => {
         _squeueMonitorRefresh = null;
     });
@@ -2426,11 +2456,12 @@ function refreshSqueueMonitor() {
 }
 
 // Show the monitor and keep it current, polling while the tab is visible and
-// catching up as soon as it is shown again.
-function initSqueueMonitor() {
-    const el = mountSqueueMonitor();
+// catching up as soon as it is shown again. `hiddenJobNames` are left out of
+// what it shows; `container` is where it is mounted (default: atop the page).
+function initSqueueMonitor({ hiddenJobNames = null, container = null } = {}) {
+    _squeueMonitorOptions = { hiddenJobNames, container };
+    const el = drawSqueueMonitor();
     if (!el) return Promise.resolve();
-    el.innerHTML = renderSqueueMonitor(_squeueMonitorState);
     if (_squeueMonitorTimer === null) {
         _squeueMonitorTimer = setInterval(() => {
             if (document.visibilityState !== "hidden") refreshSqueueMonitor();
@@ -2450,6 +2481,7 @@ function stopSqueueMonitor() {
     _squeueMonitorTimer = null;
     document.removeEventListener("visibilitychange", onSqueueMonitorVisibilityChange);
     _squeueMonitorState = { snapshot: undefined, error: null };
+    _squeueMonitorOptions = { hiddenJobNames: null, container: null };
     _newestMonitorBranch = null;
 }
 
@@ -6572,6 +6604,17 @@ async function init() {
             'Open a successful run\'s postprocessed spike sorting in <a href="https://github.com/SpikeInterface/spikeinterface-gui" target="_blank" rel="noopener">SpikeInterface GUI</a>, streamed directly from the DANDI Archive.'
         );
     }
+    if (_viewMode === "status") {
+        setPageCopy(
+            "Cluster Status",
+            `The latest <code>squeue</code> snapshot of every DANDI Compute job on MIT Engaging, including the always-on queue submitter, recorded every 5 minutes to <a href="${GLOBAL_LOGS_REPO_URL}" target="_blank" rel="noopener">dandi-compute-global-logs</a>.`
+        );
+        // Nothing else to load: the monitor is the page.
+        document.getElementById("runs").innerHTML = "";
+        showDiffResults();
+        initSqueueMonitor({ container: document.getElementById("runs") });
+        return;
+    }
     if (_viewMode === "archive") {
         setPageCopy(
             "Archived Pipeline Runs",
@@ -6634,8 +6677,9 @@ async function init() {
         }
         return;
     }
-    // The live squeue snapshot heads the dashboard, above the page title.
-    if (_viewMode === "dashboard") initSqueueMonitor();
+    // The live squeue snapshot heads the dashboard, above the page title, with
+    // the always-on infrastructure jobs left out (the Status page shows them).
+    if (_viewMode === "dashboard") initSqueueMonitor({ hiddenJobNames: SQUEUE_INFRASTRUCTURE_JOB_NAMES });
     // Top display of current queue scheduling priorities. Irrelevant to the
     // archive page, which shows already-completed (failed) runs.
     if (_viewMode !== "archive") initQueuePriorities();
@@ -6674,7 +6718,9 @@ if (typeof module !== "undefined" && module.exports) {
         updateRunCard,
         fetchArchiveState,
         fetchLatestSqueueSnapshot,
+        hideSqueueJobs,
         initSqueueMonitor,
+        SQUEUE_INFRASTRUCTURE_JOB_NAMES,
         monitorDayBranch,
         refreshSqueueMonitor,
         renderSqueueMonitor,
