@@ -2045,16 +2045,19 @@ async function initQueuePriorities() {
    lead nowhere, the newest day branch is found by listing the monitor/
    branches through the GitHub API instead (at most every 10 minutes). Files are
    read from the raw CDN (max-age=300), so a new snapshot shows within ~5
-   minutes and the polls in between are browser-cache hits. */
+   minutes and the polls in between are browser-cache hits.
+   The disk usage snapshot is recorded the same way under its own kind, `disk`:
+   `disk/YYYY-MM-DD` branches, disk/{HH}/{YYYYMMDDTHHMMSS}-usage/, disk/LATEST
+   and the `disk/latest` pointer branch. */
 const GLOBAL_LOGS_REPO_URL = "https://github.com/dandi-compute/dandi-compute-global-logs";
 const GLOBAL_LOGS_RAW_BASE = "https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads";
-const MONITOR_POINTER_BRANCH = "monitor/latest";
-// Every branch whose name starts with "monitor" (the API matches by prefix).
-const MONITOR_BRANCHES_URL =
-    "https://api.github.com/repos/dandi-compute/dandi-compute-global-logs/git/matching-refs/heads/monitor";
+// Every branch whose name starts with the kind (the API matches by prefix).
+const monitorBranchesUrl = (kind) =>
+    `https://api.github.com/repos/dandi-compute/dandi-compute-global-logs/git/matching-refs/heads/${kind}`;
 const MONITOR_BRANCHES_TTL_MS = 10 * 60 * 1000;
 const MONITOR_TIME_ZONE = "America/New_York";
-const MONITOR_DAY_BRANCH_PATTERN = /^monitor\/\d{4}-\d{2}-\d{2}$/;
+// A snapshot kind's day branch, e.g. monitor/2026-11-05.
+const dayBranchPattern = (kind) => new RegExp(`^${kind}/\\d{4}-\\d{2}-\\d{2}$`);
 const MONITOR_RECORD_PATTERN = /^\d{2}\/(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})-[\w.-]+$/;
 const SQUEUE_POLL_INTERVAL_MS = 60 * 1000;
 // Three missed 5-minute snapshots mark the view stale.
@@ -2062,6 +2065,8 @@ const SQUEUE_STALE_AFTER_MS = 15 * 60 * 1000;
 /* The disk usage snapshot (launcher/disk.sh in dandi-compute-runner) is taken
    every 30 minutes: `df` for the home and DANDI project directories, then `du`
    of the home directory itself. Shown on the Status page. */
+const SQUEUE_KIND = "monitor";
+const DISK_KIND = "disk";
 const DISK_POLL_INTERVAL_MS = 5 * 60 * 1000;
 // Three missed 30-minute snapshots mark the view stale.
 const DISK_STALE_AFTER_MS = 90 * 60 * 1000;
@@ -2126,10 +2131,10 @@ function zonedWallTimeToEpoch({ year, month, day, hour, minute, second }, timeZo
     return asUtc - offsetAt(asUtc - offsetAt(asUtc));
 }
 
-// The day branch the cluster records today's snapshots on.
-function monitorDayBranch(now = new Date()) {
+// The day branch the cluster records today's snapshots of `kind` on.
+function monitorDayBranch(now = new Date(), kind = SQUEUE_KIND) {
     const { year, month, day } = zonedDateParts(now, MONITOR_TIME_ZONE);
-    return `monitor/${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    return `${kind}/${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 // When a snapshot was taken, from its record name ("14/20261105T144502-squeue");
@@ -2149,65 +2154,56 @@ async function fetchGlobalLogsText(branch, path) {
     return resp.text();
 }
 
-// The day branch monitor/latest names, or null when it names none.
-async function pointedMonitorBranch() {
-    const pointed = (await fetchGlobalLogsText(MONITOR_POINTER_BRANCH, "LATEST"))?.trim();
-    return pointed && MONITOR_DAY_BRANCH_PATTERN.test(pointed) ? pointed : null;
+// The day branch {kind}/latest names, or null when it names none.
+async function pointedMonitorBranch(kind) {
+    const pointed = (await fetchGlobalLogsText(`${kind}/latest`, "LATEST"))?.trim();
+    return pointed && dayBranchPattern(kind).test(pointed) ? pointed : null;
 }
 
-// The newest monitor day branch on GitHub, by listing them; null when there is
-// none or the API cannot be reached. The answer is kept for 10 minutes so that
-// polling never spends the API's hourly allowance, and the request itself is
-// ETag-revalidated (a 304 does not count against it).
-let _newestMonitorBranch = null; // { branch, at }
-async function newestMonitorBranch(now = Date.now()) {
-    if (_newestMonitorBranch && now - _newestMonitorBranch.at < MONITOR_BRANCHES_TTL_MS) {
-        return _newestMonitorBranch.branch;
-    }
+// The newest day branch of `kind` on GitHub, by listing them; null when there
+// is none or the API cannot be reached. The answer is kept for 10 minutes so
+// that polling never spends the API's hourly allowance, and the request itself
+// is ETag-revalidated (a 304 does not count against it).
+const _newestMonitorBranch = new Map(); // kind → { branch, at }
+async function newestMonitorBranch(kind, now = Date.now()) {
+    const kept = _newestMonitorBranch.get(kind);
+    if (kept && now - kept.at < MONITOR_BRANCHES_TTL_MS) return kept.branch;
     let branch = null;
     try {
-        const resp = await cachedFetch(MONITOR_BRANCHES_URL);
+        const resp = await cachedFetch(monitorBranchesUrl(kind));
         const refs = resp.ok ? await resp.json() : [];
+        const pattern = dayBranchPattern(kind);
         const days = (Array.isArray(refs) ? refs : [])
             .map((ref) => String(ref?.ref ?? "").replace("refs/heads/", ""))
-            .filter((name) => MONITOR_DAY_BRANCH_PATTERN.test(name))
+            .filter((name) => pattern.test(name))
             .sort();
         branch = days.length > 0 ? days[days.length - 1] : null;
     } catch {
         /* offline, rate-limited or malformed: no branch */
     }
-    _newestMonitorBranch = { branch, at: now };
+    _newestMonitorBranch.set(kind, { branch, at: now });
     return branch;
 }
 
-// The newest `name` snapshot a day branch names: from monitor/LATEST-{name},
-// or, on a day branch from before the pointers were split by name, from
-// monitor/LATEST when it names a snapshot of that name. Null when it names
-// none (or the branch is not there).
-async function latestMonitorRecord(branch, name) {
-    for (const pointer of [`monitor/LATEST-${name}`, "monitor/LATEST"]) {
-        const text = await fetchGlobalLogsText(branch, pointer);
-        if (text === null) continue;
-        const recordName = text.trim();
-        return MONITOR_RECORD_PATTERN.test(recordName) && recordName.endsWith(`-${name}`) ? recordName : null;
-    }
-    return null;
-}
-
-// The newest `name` snapshot ("squeue", "disk"): from today's day branch when
-// there is one, else from the day branch monitor/latest names, else from the
-// newest day branch GitHub lists. Null when none of them leads to one.
-async function fetchLatestMonitorSnapshot(name, now = new Date()) {
+// The newest snapshot of `kind` ("monitor" for squeue, "disk"): from today's
+// day branch when there is one, else from the day branch {kind}/latest names,
+// else from the newest day branch GitHub lists. Null when none of them leads
+// to one.
+async function fetchLatestMonitorSnapshot(kind, now = new Date()) {
     const tried = new Set();
     let found = null;
     // Today's branch is known outright, so its lookup starts without waiting.
-    const candidates = [monitorDayBranch(now), pointedMonitorBranch, () => newestMonitorBranch(now.getTime())];
+    const candidates = [
+        monitorDayBranch(now, kind),
+        () => pointedMonitorBranch(kind),
+        () => newestMonitorBranch(kind, now.getTime()),
+    ];
     for (const candidate of candidates) {
         const branch = typeof candidate === "function" ? await candidate() : candidate;
         if (!branch || tried.has(branch)) continue;
         tried.add(branch);
-        const recordName = await latestMonitorRecord(branch, name);
-        if (recordName) {
+        const recordName = (await fetchGlobalLogsText(branch, `${kind}/LATEST`))?.trim();
+        if (recordName && MONITOR_RECORD_PATTERN.test(recordName)) {
             found = { branch, recordName };
             break;
         }
@@ -2215,7 +2211,7 @@ async function fetchLatestMonitorSnapshot(name, now = new Date()) {
     if (!found) return null;
 
     const { branch, recordName } = found;
-    const directory = `monitor/${recordName}`;
+    const directory = `${kind}/${recordName}`;
     const [stdout, stderr, exitStatus] = await Promise.all([
         fetchGlobalLogsText(branch, `${directory}/stdout`),
         fetchGlobalLogsText(branch, `${directory}/stderr`).catch(() => null),
@@ -2232,8 +2228,8 @@ async function fetchLatestMonitorSnapshot(name, now = new Date()) {
     };
 }
 
-const fetchLatestSqueueSnapshot = (now = new Date()) => fetchLatestMonitorSnapshot("squeue", now);
-const fetchLatestDiskSnapshot = (now = new Date()) => fetchLatestMonitorSnapshot("disk", now);
+const fetchLatestSqueueSnapshot = (now = new Date()) => fetchLatestMonitorSnapshot(SQUEUE_KIND, now);
+const fetchLatestDiskSnapshot = (now = new Date()) => fetchLatestMonitorSnapshot(DISK_KIND, now);
 
 // Job count and per-state tally, read from the ST column of squeue's
 // fixed-width table (its first line is the header). Null without that column.
@@ -2553,13 +2549,14 @@ function renderDiskMonitor({ snapshot, error = null } = {}, now = Date.now()) {
     });
 }
 
-// A monitor widget: the latest `name` snapshot drawn by `render`, kept
+// A monitor widget: the latest snapshot of `kind` (named `name` on screen)
+// drawn by `render`, kept
 // current by polling while the tab is visible and catching up as soon as it
 // is shown again. `init(options)` mounts it (once) and starts polling;
 // `options.container` is the element it is mounted in (default: the top of
 // the page content) and the rest is passed to `render`. A failed load keeps
 // the last snapshot on screen and says the refresh failed.
-function createMonitorWidget({ name, elementId, ariaLabel, render, pollIntervalMs }) {
+function createMonitorWidget({ kind, name, elementId, ariaLabel, render, pollIntervalMs }) {
     let state = { snapshot: undefined, error: null };
     let options = {};
     let refreshing = null; // the load in flight, so polls never overlap
@@ -2588,7 +2585,7 @@ function createMonitorWidget({ name, elementId, ariaLabel, render, pollIntervalM
         if (refreshing) return refreshing;
         refreshing = (async () => {
             try {
-                state = { snapshot: await fetchLatestMonitorSnapshot(name), error: null };
+                state = { snapshot: await fetchLatestMonitorSnapshot(kind), error: null };
             } catch (err) {
                 state = {
                     snapshot: state.snapshot,
@@ -2631,6 +2628,7 @@ function createMonitorWidget({ name, elementId, ariaLabel, render, pollIntervalM
 }
 
 const squeueMonitor = createMonitorWidget({
+    kind: SQUEUE_KIND,
     name: "squeue",
     elementId: "squeue-monitor",
     ariaLabel: "Latest squeue snapshot from MIT Engaging",
@@ -2638,6 +2636,7 @@ const squeueMonitor = createMonitorWidget({
     pollIntervalMs: SQUEUE_POLL_INTERVAL_MS,
 });
 const diskMonitor = createMonitorWidget({
+    kind: DISK_KIND,
     name: "disk",
     elementId: "disk-monitor",
     ariaLabel: "Latest disk usage snapshot from MIT Engaging",
@@ -2655,7 +2654,7 @@ const refreshDiskMonitor = () => diskMonitor.refresh();
 function stopMonitors() {
     squeueMonitor.stop();
     diskMonitor.stop();
-    _newestMonitorBranch = null;
+    _newestMonitorBranch.clear();
 }
 
 /* ─── DANDI Archive backup partitions (the Status page) ─────── */

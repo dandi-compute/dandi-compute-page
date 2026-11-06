@@ -4116,14 +4116,20 @@ describe("live squeue monitor", () => {
 
     // Serve `files` (branch → path → text) for the global logs repository; anything else is a 404.
     // `branches`, when given, is what the GitHub API lists as the repository's monitor* branches.
+    // `branches` is a list for the monitor/ branches, or { monitor, disk } lists per kind.
     const BRANCHES_API =
         "https://api.github.com/repos/dandi-compute/dandi-compute-global-logs/git/matching-refs/heads/monitor";
+    const DISK_BRANCHES_API =
+        "https://api.github.com/repos/dandi-compute/dandi-compute-global-logs/git/matching-refs/heads/disk";
     function serveGlobalLogs(files, branches = undefined) {
+        const listed = Array.isArray(branches) || branches instanceof Error ? { monitor: branches } : (branches ?? {});
         return vi.fn(async (url) => {
-            if (url === BRANCHES_API) {
-                if (branches instanceof Error) throw branches;
-                if (branches === undefined) return new Response("{}", { status: 404 });
-                const refs = branches.map((name) => ({ ref: `refs/heads/${name}`, object: { sha: "0".repeat(40) } }));
+            const kind = url === BRANCHES_API ? "monitor" : url === DISK_BRANCHES_API ? "disk" : null;
+            if (kind) {
+                const names = listed[kind];
+                if (names instanceof Error) throw names;
+                if (names === undefined) return new Response("{}", { status: 404 });
+                const refs = names.map((name) => ({ ref: `refs/heads/${name}`, object: { sha: "0".repeat(40) } }));
                 return new Response(JSON.stringify(refs), { status: 200 });
             }
             for (const [branch, paths] of Object.entries(files)) {
@@ -4143,6 +4149,12 @@ describe("live squeue monitor", () => {
         [`monitor/${record}/stderr`]: "",
         [`monitor/${record}/exit_status`]: "0\n",
         ...extra,
+    });
+    const diskSnapshotFiles = (record) => ({
+        "disk/LATEST": `${record}\n`,
+        [`disk/${record}/stdout`]: DISK_STDOUT,
+        [`disk/${record}/stderr`]: "",
+        [`disk/${record}/exit_status`]: "0\n",
     });
 
     // 2026-11-05 14:48:02 EST, three minutes after the 14:45:02 snapshot.
@@ -4166,10 +4178,12 @@ describe("live squeue monitor", () => {
         expect(monitorDayBranch(new Date("2026-11-06T05:00:00Z"))).toBe("monitor/2026-11-06");
         // Daylight time: 23:00 EDT on Jun 30.
         expect(monitorDayBranch(new Date("2026-07-01T03:00:00Z"))).toBe("monitor/2026-06-30");
+        expect(monitorDayBranch(new Date("2026-07-01T03:00:00Z"), "disk")).toBe("disk/2026-06-30");
     });
 
     it("reads a snapshot's time from its record name as US Eastern wall time", () => {
         expect(monitorRecordTime("14/20261105T144502-squeue")).toBe(Date.parse("2026-11-05T19:45:02Z"));
+        expect(monitorRecordTime("14/20261105T143001-usage")).toBe(Date.parse("2026-11-05T19:30:01Z"));
         expect(monitorRecordTime("06/20260701T060000-squeue")).toBe(Date.parse("2026-07-01T10:00:00Z"));
         expect(monitorRecordTime("20261105T144502-squeue")).toBeNull();
         expect(monitorRecordTime(undefined)).toBeNull();
@@ -4216,11 +4230,7 @@ describe("live squeue monitor", () => {
                 "https://github.com/dandi-compute/dandi-compute-global-logs/blob/monitor/2026-11-05/monitor/14/20261105T144502-squeue/stdout",
         });
         const urls = global.fetch.mock.calls.map(([url]) => url);
-        // The pointer by name first, then the one shared by every name (older day branches).
-        expect(urls.slice(0, 2)).toEqual([
-            `${RAW}/monitor/2026-11-05/monitor/LATEST-squeue`,
-            `${RAW}/monitor/2026-11-05/monitor/LATEST`,
-        ]);
+        expect(urls[0]).toBe(`${RAW}/monitor/2026-11-05/monitor/LATEST`);
         // The pointer is only needed when today has no branch.
         expect(urls.some((url) => url.includes("monitor/latest"))).toBe(false);
     });
@@ -4236,11 +4246,9 @@ describe("live squeue monitor", () => {
         expect(snapshot.branch).toBe("monitor/2026-11-02");
         expect(snapshot.recordName).toBe("06/20261102T065502-squeue");
         expect(snapshot.takenAt).toBe(Date.parse("2026-11-02T11:55:02Z"));
-        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 5)).toEqual([
-            `${RAW}/monitor/2026-11-05/monitor/LATEST-squeue`,
+        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 3)).toEqual([
             `${RAW}/monitor/2026-11-05/monitor/LATEST`,
             `${RAW}/monitor/latest/LATEST`,
-            `${RAW}/monitor/2026-11-02/monitor/LATEST-squeue`,
             `${RAW}/monitor/2026-11-02/monitor/LATEST`,
         ]);
     });
@@ -4266,89 +4274,56 @@ describe("live squeue monitor", () => {
         global.fetch = serveGlobalLogs({ ...files, "monitor/latest": { LATEST: "monitor/2026-11-01\n" } }, listed);
         snapshot = await fetchLatestSqueueSnapshot(NOW);
         expect(snapshot.branch).toBe("monitor/2026-11-02");
-        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 8)).toEqual([
-            `${RAW}/monitor/2026-11-05/monitor/LATEST-squeue`,
+        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 5)).toEqual([
             `${RAW}/monitor/2026-11-05/monitor/LATEST`,
             `${RAW}/monitor/latest/LATEST`,
-            `${RAW}/monitor/2026-11-01/monitor/LATEST-squeue`,
             `${RAW}/monitor/2026-11-01/monitor/LATEST`,
             BRANCHES_API,
-            `${RAW}/monitor/2026-11-02/monitor/LATEST-squeue`,
             `${RAW}/monitor/2026-11-02/monitor/LATEST`,
         ]);
     });
 
-    it("reads each kind of snapshot by its own pointer, and from LATEST only when that names its kind", async () => {
-        const squeueRecord = "14/20261105T144502-squeue";
-        const diskRecord = "14/20261105T143001-disk";
-        // A day branch from after the pointers were split by name: LATEST names the newest of any kind.
+    it("reads the disk snapshot from its own day branches, pointer branch and listing", async () => {
+        const record = "14/20261105T143001-usage";
         global.fetch = serveGlobalLogs({
-            "monitor/2026-11-05": {
-                "monitor/LATEST": `${squeueRecord}\n`,
-                "monitor/LATEST-squeue": `${squeueRecord}\n`,
-                "monitor/LATEST-disk": `${diskRecord}\n`,
-                [`monitor/${squeueRecord}/stdout`]: SQUEUE_STDOUT,
-                [`monitor/${diskRecord}/stdout`]: DISK_STDOUT,
-            },
+            "monitor/2026-11-05": snapshotFiles("14/20261105T144502-squeue"),
+            "disk/2026-11-05": diskSnapshotFiles(record),
         });
-        expect((await fetchLatestSqueueSnapshot(NOW)).recordName).toBe(squeueRecord);
         const disk = await fetchLatestDiskSnapshot(NOW);
-        expect(disk.recordName).toBe(diskRecord);
-        expect(disk.takenAt).toBe(Date.parse("2026-11-05T19:30:01Z"));
-        expect(disk.stdout).toBe(DISK_STDOUT);
-        expect(disk.sourceUrl).toBe(
-            "https://github.com/dandi-compute/dandi-compute-global-logs/blob/monitor/2026-11-05/monitor/14/20261105T143001-disk/stdout"
-        );
-
-        // A day branch from before: only LATEST, naming a squeue snapshot, which is no disk snapshot.
-        global.fetch = serveGlobalLogs({ "monitor/2026-11-05": snapshotFiles(squeueRecord) });
-        expect((await fetchLatestSqueueSnapshot(NOW)).recordName).toBe(squeueRecord);
-        expect(await fetchLatestDiskSnapshot(NOW)).toBeNull();
-
-        // LATEST naming a disk snapshot on a branch without LATEST-squeue (a runner that records disk
-        // snapshots but not yet by-name pointers) is no squeue snapshot either.
-        global.fetch = serveGlobalLogs({
-            "monitor/2026-11-05": {
-                "monitor/LATEST": `${diskRecord}\n`,
-                [`monitor/${diskRecord}/stdout`]: DISK_STDOUT,
-            },
+        expect(disk).toEqual({
+            branch: "disk/2026-11-05",
+            recordName: record,
+            takenAt: Date.parse("2026-11-05T19:30:01Z"),
+            stdout: DISK_STDOUT,
+            stderr: "",
+            exitStatus: "0",
+            sourceUrl:
+                "https://github.com/dandi-compute/dandi-compute-global-logs/blob/disk/2026-11-05/disk/14/20261105T143001-usage/stdout",
         });
-        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
-    });
+        expect(global.fetch.mock.calls.map(([url]) => url)[0]).toBe(`${RAW}/disk/2026-11-05/disk/LATEST`);
+        // The queue's branches never stand in for the disk's.
+        expect((await fetchLatestSqueueSnapshot(NOW)).recordName).toBe("14/20261105T144502-squeue");
 
-    it("lists branches at most every 10 minutes and resolves to null when nothing leads to a snapshot", async () => {
-        const apiCalls = () => global.fetch.mock.calls.filter(([url]) => url === BRANCHES_API).length;
-
-        global.fetch = serveGlobalLogs({}, []);
-        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
-        expect(apiCalls()).toBe(1);
-        // Polls within 10 minutes reuse the listing.
-        expect(await fetchLatestSqueueSnapshot(new Date(NOW.getTime() + 9 * 60 * 1000))).toBeNull();
-        expect(apiCalls()).toBe(1);
-        expect(await fetchLatestSqueueSnapshot(new Date(NOW.getTime() + 11 * 60 * 1000))).toBeNull();
-        expect(apiCalls()).toBe(2);
-
-        // A malformed pointer, an unreachable API, or a listed branch that turns out to be gone.
+        // No disk branch today: disk/latest, then the listing of disk/ branches, each kept apart from
+        // the monitor's.
         stopMonitors();
         global.fetch = serveGlobalLogs(
-            { "monitor/latest": { LATEST: "../../main\n" } },
-            new TypeError("Failed to fetch")
+            {
+                "monitor/2026-11-05": snapshotFiles("14/20261105T144502-squeue"),
+                "disk/latest": { LATEST: "disk/2026-11-02\n" },
+                "disk/2026-11-02": diskSnapshotFiles("06/20261102T063001-usage"),
+            },
+            ["monitor/2026-11-05"]
         );
-        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
+        expect((await fetchLatestDiskSnapshot(NOW)).branch).toBe("disk/2026-11-02");
         stopMonitors();
-        global.fetch = serveGlobalLogs({}, ["monitor/2026-11-04"]);
+        global.fetch = serveGlobalLogs(
+            { "disk/2026-11-02": diskSnapshotFiles("06/20261102T063001-usage") },
+            { monitor: ["monitor/2026-11-05"], disk: ["disk/2026-11-02", "disk/latest"] }
+        );
+        expect((await fetchLatestDiskSnapshot(NOW)).branch).toBe("disk/2026-11-02");
+        expect(global.fetch.mock.calls.map(([url]) => url)).toContain(DISK_BRANCHES_API);
         expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
-        // The pointer and the listing naming the same missing day are tried once.
-        stopMonitors();
-        global.fetch = serveGlobalLogs({ "monitor/latest": { LATEST: "monitor/2026-11-04\n" } }, [
-            "monitor/2026-11-04",
-        ]);
-        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
-        // Each branch is asked once, for LATEST-squeue and then LATEST.
-        expect(global.fetch.mock.calls.filter(([url]) => url.endsWith("2026-11-04/monitor/LATEST"))).toHaveLength(1);
-        expect(
-            global.fetch.mock.calls.filter(([url]) => url.endsWith("2026-11-04/monitor/LATEST-squeue"))
-        ).toHaveLength(1);
     });
 
     it("tolerates a missing stderr or exit status but not an unreachable repository", async () => {
@@ -4659,7 +4634,7 @@ describe("live squeue monitor", () => {
     it("renders the disk snapshot as tables with the Use% column and chips coloured by how full", () => {
         const snapshot = {
             branch: "monitor/2026-11-05",
-            recordName: "14/20261105T143001-disk",
+            recordName: "14/20261105T143001-usage",
             takenAt: Date.parse("2026-11-05T19:30:01Z"),
             stdout: DISK_STDOUT,
             stderr: "",
@@ -4731,14 +4706,7 @@ describe("live squeue monitor", () => {
         vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
         vi.setSystemTime(NOW);
         document.body.innerHTML = `<div class="page-content"><h1>Cluster Status</h1><div id="status-disk"></div></div>`;
-        const record = "14/20261105T143001-disk";
-        global.fetch = serveGlobalLogs({
-            "monitor/2026-11-05": {
-                "monitor/LATEST": `${record}\n`,
-                "monitor/LATEST-disk": `${record}\n`,
-                [`monitor/${record}/stdout`]: DISK_STDOUT,
-            },
-        });
+        global.fetch = serveGlobalLogs({ "disk/2026-11-05": diskSnapshotFiles("14/20261105T143001-usage") });
 
         await initDiskMonitor({ container: document.getElementById("status-disk") });
         const monitor = document.getElementById("disk-monitor");
