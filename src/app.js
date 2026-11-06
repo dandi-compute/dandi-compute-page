@@ -94,7 +94,19 @@ let _openGroupKeys = new Set();
 const FLAT_RENDER_CHUNK = 200;
 let _flatRenderLimit = FLAT_RENDER_CHUNK;
 
-const ALLOWED_VIEW_MODES = new Set(["dashboard", "compare", "params", "curation", "tests", "archive", "status"]);
+const ALLOWED_VIEW_MODES = new Set([
+    "dashboard",
+    "compare",
+    "params",
+    "curation",
+    "tests",
+    "archive",
+    "issues",
+    "status",
+]);
+/* Views that render the shared filter banner over queue-state runs, so filter
+   links and the filter form must carry their `view` param along. */
+const QUEUE_VIEW_MODES = new Set(["dashboard", "tests", "archive", "issues"]);
 
 function parseViewMode() {
     const rawView = new URLSearchParams(window.location.search).get("view");
@@ -110,6 +122,7 @@ function syncTopNav(viewMode = parseViewMode()) {
         { selector: '.site-view-toggle-link[href="?view=curation"]', mode: "curation" },
         { selector: '.site-view-toggle-link[href="?view=tests"]', mode: "tests" },
         { selector: '.site-view-toggle-link[href="?view=archive"]', mode: "archive" },
+        { selector: '.site-view-toggle-link[href="?view=issues"]', mode: "issues" },
         { selector: '.site-view-toggle-link[href="?view=status"]', mode: "status" },
     ];
     navLinks.forEach(({ selector, mode }) => {
@@ -194,6 +207,9 @@ function parseFilter() {
         assetSize: params.get("assetSize") ?? null,
         failureStep: params.get("failureStep") ?? null,
         status: params.get("status") ?? null,
+        // Common Issues page only: which queue state the failed jobs come from
+        // ("main" | "archive"; null = both).
+        source: params.get("source") ?? null,
     };
 }
 
@@ -270,7 +286,8 @@ function isFilterActive(filter) {
         filter.dandiCodebaseVersion ||
         filter.assetSize ||
         filter.failureStep ||
-        filter.status
+        filter.status ||
+        filter.source
     );
 }
 
@@ -376,7 +393,7 @@ function narrowUrl(params) {
     sp.set("layout", parseLayoutMode());
     sp.set("sort", parseSortMode());
     sp.set("sortDir", parseSortDirection());
-    if (_viewMode === "dashboard" || _viewMode === "tests" || _viewMode === "archive") sp.set("view", _viewMode);
+    if (QUEUE_VIEW_MODES.has(_viewMode)) sp.set("view", _viewMode);
     if (params.dandiset) sp.set("dandiset", params.dandiset);
     if (params.subject) sp.set("subject", params.subject);
     if (params.session) sp.set("session", params.session);
@@ -387,6 +404,7 @@ function narrowUrl(params) {
     if (params.assetSize) sp.set("assetSize", params.assetSize);
     if (params.failureStep) sp.set("failureStep", params.failureStep);
     if (params.status) sp.set("status", params.status);
+    if (params.source) sp.set("source", params.source);
     const qs = sp.toString();
     return qs ? `?${qs}` : "./";
 }
@@ -486,6 +504,7 @@ function filterNarrowParams(filter, omit = []) {
         assetSize: filter.assetSize,
         failureStep: filter.failureStep,
         status: filter.status,
+        source: filter.source,
     };
     for (const key of omit) delete all[key];
     return all;
@@ -595,6 +614,11 @@ function renderFilterBanner(filter, availableRuns = []) {
             `<a class="filter-crumb" href="${e(narrowUrl({ status: filter.status }))}">${e(summaryStatusLabel)}</a>`
         );
     }
+    if (filter.source) {
+        crumbs.push(
+            `<a class="filter-crumb" href="${e(narrowUrl({ source: filter.source }))}">${e(ISSUE_SOURCE_LABELS[filter.source] ?? `Source: ${filter.source}`)}</a>`
+        );
+    }
 
     const runsMatchingDandiset = filter.dandisetId
         ? availableRuns.filter((run) => run.dandisetId === filter.dandisetId)
@@ -632,6 +656,10 @@ function renderFilterBanner(filter, availableRuns = []) {
             label: "🗄️ Archive",
             desc: "Showing archived failing runs only (separate from the main queue)",
         },
+        issues: {
+            label: "🧩 Common Issues",
+            desc: "Most frequent errors across failed jobs, from the main queue and the failed-runs archive",
+        },
     };
     const scopedBanner = scopedPageBanners[_viewMode];
     const testsPageHtml = scopedBanner
@@ -651,9 +679,27 @@ function renderFilterBanner(filter, availableRuns = []) {
     clearAllParams.set("layout", layoutMode);
     clearAllParams.set("sort", sortMode);
     clearAllParams.set("sortDir", sortDirection);
-    if (_viewMode === "dashboard" || _viewMode === "tests" || _viewMode === "archive")
-        clearAllParams.set("view", _viewMode);
+    if (QUEUE_VIEW_MODES.has(_viewMode)) clearAllParams.set("view", _viewMode);
     const clearAllHref = `?${clearAllParams.toString()}`;
+    // The Common Issues page only ever shows failed jobs, so its Status filter
+    // is replaced by a Source filter (main queue vs. failed-runs archive).
+    const isIssuesView = _viewMode === "issues";
+    const statusOrSourceInput = isIssuesView
+        ? renderFilterInput(
+              "source",
+              "Source",
+              filter.source,
+              Object.keys(ISSUE_SOURCE_LABELS),
+              narrowUrl(filterNarrowParams(filter, ["source"])),
+              "main or archive"
+          )
+        : renderFilterInput(
+              "status",
+              "Status",
+              filter.status,
+              statuses,
+              narrowUrl(filterNarrowParams(filter, ["status"]))
+          );
 
     banner.innerHTML = `
 ${testsPageHtml}<div class="filter-banner-main">
@@ -671,10 +717,10 @@ ${testsPageHtml}<div class="filter-banner-main">
         ${renderFilterInput("config", "Config Type", filter.configType, configTypes, narrowUrl(filterNarrowParams(filter, ["configType"])))}
         ${renderFilterInput("version", "Pipeline Version", filter.pipelineVersion, versions, narrowUrl(filterNarrowParams(filter, ["pipelineVersion"])))}
         ${renderFilterInput("codebaseVersion", "Compute Codebase Version", filter.dandiCodebaseVersion, dandiCodebaseVersions, narrowUrl(filterNarrowParams(filter, ["dandiCodebaseVersion"])))}
-        ${renderFilterInput("status", "Status", filter.status, statuses, narrowUrl(filterNarrowParams(filter, ["status"])))}
+        ${statusOrSourceInput}
         ${renderFilterInput("failureStep", "Failure Step", filter.failureStep, failureSteps, narrowUrl(filterNarrowParams(filter, ["failureStep"])))}
         <div class="filter-actions">
-            <a class="filter-clear" href="${clearAllHref}">× View all runs</a>
+            <a class="filter-clear" href="${clearAllHref}">× ${isIssuesView ? "View all issues" : "View all runs"}</a>
             <button class="filter-apply" type="submit">Apply</button>
         </div>
     </form>
@@ -6834,6 +6880,546 @@ async function loadQueueData() {
     }
 }
 
+/* ─── Common Issues page ────────────────────────────────────── */
+// The Common Issues page (?view=issues) aggregates the terminal error of every
+// failed job across the main queue and the failed-runs archive. Nothing
+// upstream publishes a per-job error summary, so the page reads each failed
+// job's Nextflow log (falling back to its SLURM log) straight from the S3
+// blob, pulls out the failing process, its exit status, and the most telling
+// stderr line, and groups jobs whose message normalizes to the same signature
+// (paths, ids, hashes, and numbers collapsed). Logs are fetched by a small
+// worker pool and the page re-renders as they land; each extracted record is
+// cached in sessionStorage by blob URL (content-addressed, so never stale) so
+// filter changes — which reload the page — don't rescan.
+const ISSUE_SOURCE_LABELS = { main: "Main queue", archive: "Archive" };
+const ISSUES_SCAN_CONCURRENCY = 6;
+const ISSUE_RECORD_CACHE_PREFIX = "issue-record-v1:";
+const ISSUE_MESSAGE_MAX_LENGTH = 400;
+const ISSUE_RENDER_THROTTLE_MS = 400;
+// Nextflow's failure block headers (trimmed lines), in the order they appear.
+const NEXTFLOW_FAILURE_SECTIONS = new Set([
+    "Caused by:",
+    "Command executed:",
+    "Command exit status:",
+    "Command output:",
+    "Command error:",
+]);
+const NEXTFLOW_FAILURE_BLOCK_END = /^(Work dir:|Container:|Tip:)/;
+// Lines Nextflow writes while a task is still fine but that contain "error" —
+// never the thing that went wrong.
+const NEXTFLOW_LOG_LINE_PREFIX = /^\w{3}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3} \[[^\]]*\] \w+\s+\S+ - /;
+// "ValueError: ...", "Exception: ...", "concurrent.futures.process.BrokenProcessPool: ...",
+// "nextflow.exception.AbortOperationException: ..."
+const EXCEPTION_LINE_PATTERN =
+    /^(?:[A-Za-z_][\w.]*\.)?(?:[A-Z]\w*(?:Error|Exception|Warning|Interrupt|Exit)|Exception|BrokenProcessPool|StopIteration)\b:?(?:\s|$)/;
+// Terminal color codes (Singularity/Apptainer error output is colored).
+const ANSI_ESCAPE_PATTERN = /\x1b\[[0-9;]*[A-Za-z]/g;
+const GENERIC_ERROR_LINE_PATTERN = /\b(error|fatal|failed|exception|killed|denied|not found|no such|traceback)\b/i;
+// Exit statuses whose meaning is clearer than whatever the process printed last.
+const EXIT_STATUS_LABELS = {
+    137: "Killed (exit status 137 — likely out of memory)",
+    140: "Time limit exceeded (exit status 140)",
+};
+const SYNTHETIC_ISSUE_MESSAGE_PATTERN = /^(?:Killed|Time limit exceeded|Exit status \d+) \(/;
+
+let _issuesScanGeneration = 0;
+let _issuesRenderTimer = null;
+let _issuesIdleResolvers = [];
+let _issuesState = null;
+let _openIssueKeys = new Set();
+let _issuesToggleInit = false;
+
+// Pick the one line of a stderr/stdout tail that best names the failure.
+function pickKeyErrorLine(lines) {
+    // A Python "Exception ignored in ..." block is interpreter-shutdown noise
+    // that trails the real traceback; nothing after it is informative.
+    const ignoredAt = lines.findIndex((line) => line.startsWith("Exception ignored in"));
+    const useful = ignoredAt === -1 ? lines : lines.slice(0, ignoredAt);
+    for (let i = useful.length - 1; i >= 0; i--) {
+        if (EXCEPTION_LINE_PATTERN.test(useful[i])) return useful[i];
+    }
+    for (let i = useful.length - 1; i >= 0; i--) {
+        if (GENERIC_ERROR_LINE_PATTERN.test(useful[i])) return useful[i];
+    }
+    return null;
+}
+
+function cleanLogLine(line) {
+    return String(line ?? "")
+        .replace(ANSI_ESCAPE_PATTERN, "")
+        .replace(NEXTFLOW_LOG_LINE_PREFIX, "")
+        .replace(/^\+ /, "")
+        .trim();
+}
+
+// Extract { process, exitStatus, message } from a Nextflow (or SLURM job) log.
+// Returns nulls when the log carries no recognizable failure.
+function extractLogFailure(text) {
+    const empty = { process: null, exitStatus: null, message: null };
+    if (!text) return empty;
+    const lines = text.split("\n");
+    let blockStart = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+        if (lines[i].includes("Error executing process")) {
+            blockStart = i;
+            break;
+        }
+    }
+    if (blockStart === -1) {
+        // No failed task: Nextflow itself aborted (e.g. the pipeline could
+        // not be resolved). Use the last exception-looking or ERROR line.
+        let message = null;
+        for (let i = lines.length - 1; i >= 0; i--) {
+            const line = cleanLogLine(lines[i]);
+            if (!line) continue;
+            if (EXCEPTION_LINE_PATTERN.test(line) || /\bERROR\b/.test(lines[i])) {
+                message = line;
+                break;
+            }
+        }
+        return { ...empty, message: message ? message.slice(0, ISSUE_MESSAGE_MAX_LENGTH) : null };
+    }
+
+    // "name (tag)" → "name", without a backtracking-prone regex on log text.
+    const processMatch = lines[blockStart].match(/Error executing process > '([^']+)'/);
+    const processLabel = processMatch ? processMatch[1] : "";
+    const tagIndex = processLabel.indexOf("(");
+    const process = (tagIndex === -1 ? processLabel : processLabel.slice(0, tagIndex)).trim() || null;
+
+    const sections = new Map();
+    let current = null;
+    for (let i = blockStart + 1; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
+        if (NEXTFLOW_FAILURE_BLOCK_END.test(trimmed)) break;
+        if (NEXTFLOW_FAILURE_SECTIONS.has(trimmed)) {
+            current = trimmed;
+            sections.set(current, []);
+            continue;
+        }
+        if (current && trimmed) sections.get(current).push(trimmed);
+    }
+    const exitText = sections.get("Command exit status:")?.[0] ?? null;
+    const exitStatus = exitText && /^-?\d+$/.test(exitText) ? Number(exitText) : null;
+    const errLines = sections.get("Command error:") ?? [];
+    const outLines = sections.get("Command output:") ?? [];
+    let message = pickKeyErrorLine(errLines) ?? pickKeyErrorLine(outLines);
+    const exceptionFound = message !== null && EXCEPTION_LINE_PATTERN.test(message);
+    if (!exceptionFound && exitStatus !== null && EXIT_STATUS_LABELS[exitStatus]) {
+        message = EXIT_STATUS_LABELS[exitStatus];
+    } else if (message === null) {
+        // Nothing telling was printed: summarize by exit status (the "Caused
+        // by" line only restates the process name, which would split one
+        // silent failure into a group per process).
+        message =
+            exitStatus !== null
+                ? `Exit status ${exitStatus} (no error message in log)`
+                : (sections.get("Caused by:")?.[0] ?? null);
+    }
+    return {
+        process,
+        exitStatus,
+        message: message ? cleanLogLine(message).slice(0, ISSUE_MESSAGE_MAX_LENGTH) : null,
+    };
+}
+
+// Collapse the volatile parts of an error message so that the same failure on
+// different inputs groups together: URLs, absolute paths, uuids, hashes,
+// addresses, and numbers become placeholders.
+function normalizeIssueSignature(message) {
+    if (!message) return null;
+    // Labels this page synthesizes (exit-status summaries) are already stable.
+    if (SYNTHETIC_ISSUE_MESSAGE_PATTERN.test(message)) return message;
+    return cleanLogLine(message)
+        .replace(/https?:\/\/\S+/g, "<url>")
+        .replace(/(^|[\s"'`=:(,])\/[^\s"'`),]+/g, "$1<path>")
+        .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "<id>")
+        .replace(/\b0x[0-9a-f]+\b/gi, "<addr>")
+        .replace(/\b[0-9a-f]{7,}\b/gi, "<hash>")
+        .replace(/\b\d+(?:\.\d+)*\b/g, "<n>")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+
+// Build a run's issue record from its log text (null text = log unavailable).
+function issueRecordFromLog(text, logName = null) {
+    const failure = extractLogFailure(text);
+    return {
+        log: logName,
+        process: failure.process,
+        exitStatus: failure.exitStatus,
+        message: failure.message,
+        signature: normalizeIssueSignature(failure.message),
+    };
+}
+
+// The log to read for a run: nextflow.log, else its (first) SLURM job log.
+function issueLogForRun(run) {
+    const logFiles = run.logFiles ?? runLogFiles(run);
+    const name =
+        (logFiles.includes("nextflow.log") ? "nextflow.log" : null) ??
+        logFiles.filter((f) => f.endsWith("_slurm.log")).sort()[0] ??
+        null;
+    if (!name) return null;
+    const url = resolveBlobUrl(run, `${run.path}/logs/${name}`);
+    return url ? { name, url } : null;
+}
+
+function readCachedIssueRecord(url) {
+    try {
+        const raw = sessionStorage.getItem(ISSUE_RECORD_CACHE_PREFIX + url);
+        return raw ? JSON.parse(raw) : null;
+    } catch {
+        return null;
+    }
+}
+
+function writeCachedIssueRecord(url, record) {
+    try {
+        sessionStorage.setItem(ISSUE_RECORD_CACHE_PREFIX + url, JSON.stringify(record));
+    } catch {
+        /* storage unavailable or full; the Cache API still holds the blob */
+    }
+}
+
+async function scanRunIssue(run) {
+    const log = issueLogForRun(run);
+    if (!log) return issueRecordFromLog(null, null);
+    const cached = readCachedIssueRecord(log.url);
+    if (cached) return cached;
+    let text = null;
+    try {
+        const resp = await cachedFetch(log.url);
+        if (resp.ok) text = await resp.text();
+    } catch {
+        /* unreachable log: recorded as "no error details" */
+    }
+    const record = issueRecordFromLog(text, log.name);
+    if (text !== null) writeCachedIssueRecord(log.url, record);
+    return record;
+}
+
+// Attach a scanned record to its run. The failing process also settles the
+// run's failure step so the shared Failure Step filter applies here too.
+function applyIssueRecord(run, record) {
+    run.issue = record;
+    run.failureStep = record.process ? classifyFailedTaskStep(record.process) : "other";
+    run.traceLoaded = true;
+    run.statusSettled = true;
+}
+
+const countInto = (map, key) => map.set(key, (map.get(key) ?? 0) + 1);
+const sortedCounts = (map) =>
+    [...map.entries()].sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])));
+
+// Group scanned runs by issue signature, most frequent first.
+function groupIssues(runs) {
+    const groups = new Map();
+    for (const run of runs) {
+        const record = run.issue;
+        if (!record) continue;
+        const key = record.signature ?? "__no_details__";
+        if (!groups.has(key)) {
+            groups.set(key, {
+                key,
+                signature: record.signature,
+                example: record.message,
+                count: 0,
+                runs: [],
+                processes: new Map(),
+                exitStatuses: new Map(),
+                versions: new Map(),
+                sources: new Map(),
+                dandisets: new Map(),
+                firstSeen: null,
+                lastSeen: null,
+            });
+        }
+        const group = groups.get(key);
+        group.count++;
+        group.runs.push(run);
+        if (record.process) countInto(group.processes, record.process);
+        if (record.exitStatus !== null && record.exitStatus !== undefined)
+            countInto(group.exitStatuses, record.exitStatus);
+        if (run.pipelineVersion) countInto(group.versions, run.pipelineVersion);
+        if (run.source) countInto(group.sources, run.source);
+        if (run.dandisetId) countInto(group.dandisets, run.dandisetId);
+        if (run.createdAt) {
+            if (!group.firstSeen || run.createdAt < group.firstSeen) group.firstSeen = run.createdAt;
+            if (!group.lastSeen || run.createdAt > group.lastSeen) group.lastSeen = run.createdAt;
+        }
+    }
+    return [...groups.values()].sort((a, b) => {
+        // Jobs without any error details always sink to the bottom.
+        if ((a.signature === null) !== (b.signature === null)) return a.signature === null ? 1 : -1;
+        return b.count - a.count || String(a.signature).localeCompare(String(b.signature));
+    });
+}
+
+function formatIssueDate(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    return Number.isNaN(date.getTime()) ? String(value).slice(0, 10) : date.toISOString().slice(0, 10);
+}
+
+// Link to the job's run on the dashboard/archive page, narrowed to its session.
+function issueRunHref(run) {
+    const sp = new URLSearchParams();
+    sp.set("view", run.source === "archive" ? "archive" : "dashboard");
+    sp.set("layout", "flat");
+    if (run.dandisetId) sp.set("dandiset", run.dandisetId);
+    if (run.subject) sp.set("subject", run.subject);
+    if (run.session) sp.set("session", run.session);
+    sp.set("status", "failed");
+    return `?${sp.toString()}`;
+}
+
+function renderIssueChips(label, counts, hrefFor = null, formatValue = (value) => String(value)) {
+    if (counts.length === 0) return "";
+    const chips = counts
+        .map(([value, count]) => {
+            const text = `${e(formatValue(value))} <span class="issue-chip-count">${count}</span>`;
+            const href = hrefFor ? hrefFor(value) : null;
+            return href
+                ? `<a class="issue-chip issue-chip-link" href="${e(href)}">${text}</a>`
+                : `<span class="issue-chip">${text}</span>`;
+        })
+        .join("");
+    return `<span class="issue-chip-row"><span class="issue-chip-label">${e(label)}</span>${chips}</span>`;
+}
+
+function renderIssueJobsTable(group) {
+    const rows = [...group.runs]
+        .sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")))
+        .map((run) => {
+            const log = issueLogForRun(run);
+            const logBtn = log
+                ? `<button class="log-link" data-log-url="${e(log.url)}" data-log-label="${e(`${logLabel(log.name)} — ${run.jobId ?? run.path}`)}" data-log-html="false" data-log-table="false" data-log-external="${e(log.url)}">${e(logLabel(log.name))}</button>`
+                : `<span class="issue-muted">—</span>`;
+            const where = [run.subject ? `sub-${run.subject}` : null, run.session ? `ses-${run.session}` : null]
+                .filter(Boolean)
+                .join(" / ");
+            return `<tr>
+    <td><a class="issue-job-link" href="${e(issueRunHref(run))}" title="Show this job on its results page">${e(run.jobId ?? `Attempt ${run.attempt ?? "?"}`)}</a></td>
+    <td>${e(run.dandisetId ?? "")}</td>
+    <td class="issue-jobs-where">${e(where)}</td>
+    <td>${e(run.pipelineVersion ?? "")}</td>
+    <td>${e(run.issue?.process ?? "")}</td>
+    <td>${e(run.issue?.exitStatus ?? "")}</td>
+    <td>${e(ISSUE_SOURCE_LABELS[run.source] ?? run.source ?? "")}</td>
+    <td>${e(formatIssueDate(run.createdAt))}</td>
+    <td>${logBtn}</td>
+</tr>`;
+        })
+        .join("");
+    return `<div class="issue-jobs-wrap"><table class="issue-jobs">
+    <thead><tr><th>Job</th><th>Dandiset</th><th>Subject / Session</th><th>Version</th><th>Process</th><th>Exit</th><th>Source</th><th>Created</th><th>Log</th></tr></thead>
+    <tbody>${rows}</tbody>
+</table></div>`;
+}
+
+function renderIssueGroup(group, rank, scannedTotal, maxCount, filter) {
+    const share = scannedTotal ? Math.round((group.count / scannedTotal) * 100) : 0;
+    const width = maxCount ? Math.max(2, Math.round((group.count / maxCount) * 100)) : 0;
+    const title = group.signature ?? "No error details found in the job's logs";
+    const example = group.example && group.example !== group.signature ? group.example : null;
+    const stepHref = (process) => {
+        const step = classifyFailedTaskStep(process);
+        return step === "other" ? null : narrowUrl({ ...filterNarrowParams(filter), failureStep: step });
+    };
+    const chips = [
+        renderIssueChips("Process", sortedCounts(group.processes), stepHref),
+        renderIssueChips("Exit", sortedCounts(group.exitStatuses)),
+        renderIssueChips("Version", sortedCounts(group.versions), (version) =>
+            narrowUrl({ ...filterNarrowParams(filter), pipelineVersion: version })
+        ),
+        renderIssueChips(
+            "Source",
+            sortedCounts(group.sources),
+            (source) => narrowUrl({ ...filterNarrowParams(filter), source }),
+            (source) => ISSUE_SOURCE_LABELS[source] ?? source
+        ),
+        renderIssueChips("Dandiset", sortedCounts(group.dandisets).slice(0, 8), (dandisetId) =>
+            narrowUrl({ ...filterNarrowParams(filter, ["subject", "session"]), dandiset: dandisetId })
+        ),
+    ].join("");
+    const seen =
+        group.firstSeen || group.lastSeen
+            ? `<span class="issue-seen">${e(formatIssueDate(group.firstSeen))}${group.firstSeen !== group.lastSeen ? ` → ${e(formatIssueDate(group.lastSeen))}` : ""}</span>`
+            : "";
+    const open = _openIssueKeys.has(group.key) ? " open" : "";
+    return `<li class="issue-group${group.signature === null ? " issue-group-nodetails" : ""}">
+<details class="issue-details" data-issue-key="${e(group.key)}"${open}>
+    <summary class="issue-summary">
+        <span class="issue-rank">#${rank}</span>
+        <span class="issue-count"><span class="issue-count-value">${group.count}</span><span class="issue-count-label">${group.count === 1 ? "job" : "jobs"} · ${share}%</span></span>
+        <span class="issue-main">
+            <code class="issue-message">${e(title)}</code>
+            <span class="issue-bar" aria-hidden="true"><span class="issue-bar-fill" style="width: ${width}%"></span></span>
+            <span class="issue-chips">${chips}${seen}</span>
+        </span>
+    </summary>
+    <div class="issue-body">
+        ${example ? `<p class="issue-example"><span class="issue-example-label">Example</span> <code>${e(example)}</code></p>` : ""}
+        ${renderIssueJobsTable(group)}
+    </div>
+</details>
+</li>`;
+}
+
+// Render the page from the current scan state. `runs` are the in-filter failed
+// jobs (scanned or not); groups cover the scanned ones.
+function renderIssuesPage(state) {
+    const { runs, filter, done } = state;
+    // Counts are rendered into markup: coerce them to integers first.
+    const scanned = Math.max(0, Math.trunc(Number(state.scanned)) || 0);
+    const total = Math.max(0, Math.trunc(Number(state.total)) || 0);
+    const scannedRuns = runs.filter((run) => run.issue);
+    const groups = groupIssues(scannedRuns);
+    const noDetails = scannedRuns.filter((run) => !run.issue.signature).length;
+    const distinct = groups.filter((group) => group.signature !== null).length;
+    const pct = total ? Math.round((scanned / total) * 100) : 100;
+    document.getElementById("summary").innerHTML = `
+        <div class="summary-stats">
+            <div class="stat-item stat-failed">
+                <span class="stat-value">${runs.length}</span>
+                <span class="stat-label">Failed Jobs</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-value">${distinct}</span>
+                <span class="stat-label">Distinct Issues</span>
+            </div>
+            <div class="stat-item${done ? "" : " stat-scanning"}">
+                <span class="stat-value">${scanned}<span class="stat-of"> / ${total}</span></span>
+                <span class="stat-label">Logs Scanned</span>
+                <span class="issue-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span class="issue-progress-fill" style="width: ${pct}%"></span></span>
+            </div>
+            ${
+                noDetails
+                    ? `<div class="stat-item">
+                <span class="stat-value">${noDetails}</span>
+                <span class="stat-label">No Error Details</span>
+            </div>`
+                    : ""
+            }
+        </div>`;
+    const maxCount = groups[0]?.count ?? 0;
+    const list = groups.length
+        ? `<ol class="issue-list">${groups.map((group, i) => renderIssueGroup(group, i + 1, scannedRuns.length, maxCount, filter)).join("")}</ol>`
+        : `<p class="issue-empty">${done ? "No failed jobs match the current filter." : "Scanning failed jobs' logs…"}</p>`;
+    document.getElementById("runs").innerHTML = `<section class="issues-page">
+    <p class="issue-intro">Failed jobs grouped by the error that ended them. Each group's message is normalized (paths, ids, hashes, and numbers collapsed); expand a group for the affected jobs and their logs.${
+        done
+            ? ""
+            : ` <span class="issue-scanning">Scanning ${total - scanned} more log${total - scanned === 1 ? "" : "s"}…</span>`
+    }</p>
+    ${list}
+</section>`;
+}
+
+function scheduleIssuesRender() {
+    if (_issuesRenderTimer !== null) return;
+    _issuesRenderTimer = setTimeout(() => {
+        _issuesRenderTimer = null;
+        if (_issuesState) renderIssuesPage(_issuesState);
+    }, ISSUE_RENDER_THROTTLE_MS);
+}
+
+// Resolves once the current scan has finished (tests and debugging).
+function issuesScanIdle() {
+    if (!_issuesState || _issuesState.done) return Promise.resolve();
+    return new Promise((resolve) => _issuesIdleResolvers.push(resolve));
+}
+
+function initIssueToggles() {
+    if (_issuesToggleInit) return;
+    _issuesToggleInit = true;
+    // "toggle" doesn't bubble; capture on the container sees every group.
+    document.getElementById("runs")?.addEventListener(
+        "toggle",
+        (evt) => {
+            const details = evt.target;
+            if (!(details instanceof Element) || !details.classList.contains("issue-details")) return;
+            const key = details.dataset.issueKey;
+            if (details.open) _openIssueKeys.add(key);
+            else _openIssueKeys.delete(key);
+        },
+        true
+    );
+}
+
+// Fetch the failed jobs of the requested source(s), scan their logs, and
+// render the grouped issues as the scan progresses.
+async function loadIssuesData() {
+    // This loader is the Common Issues view, whatever entry point called it
+    // (init, or a test driving it directly).
+    _viewMode = "issues";
+    showLoading();
+    renderFilterBanner(parseFilter(), []);
+    const gen = ++_issuesScanGeneration;
+    _issuesState = null;
+    _activeFilterKey = null; // filter changes reload the page (no in-page navigation here)
+    initIssueToggles();
+
+    try {
+        const registriesReady = ensureRegistriesLoaded();
+        const filter = parseFilter();
+        const sources =
+            filter.source === "main" ? ["main"] : filter.source === "archive" ? ["archive"] : ["main", "archive"];
+        const states = await Promise.all(
+            sources.map(async (source) => {
+                const entries = source === "archive" ? await fetchArchiveState() : await fetchQueueState();
+                return parseQueueEntries(entries).map((run) => ({ ...run, source }));
+            })
+        );
+        await registriesReady;
+        const allRuns = states.flat().map(buildInitialRun);
+        // Same scope as the dashboard: internal test runs stay out of the main
+        // queue's failures; the archive is shown as-is.
+        const failedRuns = allRuns.filter(
+            (run) => isFailedStatus(run.status) && !(run.source === "main" && TEST_DANDISETS.has(run.dandisetId))
+        );
+        if (gen !== _issuesScanGeneration) return;
+
+        // The failure-step filter needs the scan (it is derived from the failing
+        // process), so the scan scope is the filter minus that one field.
+        const scanRuns = applyFilter(failedRuns, { ...filter, failureStep: null, status: null });
+        const inFilter = () => applyFilter(scanRuns, { ...filter, status: null });
+        const state = { runs: inFilter(), scanned: 0, total: scanRuns.length, filter, done: scanRuns.length === 0 };
+        _issuesState = state;
+        renderFilterBanner(filter, failedRuns);
+        renderIssuesPage(state);
+        showResults();
+        document.getElementById("layout-bar").style.display = "none";
+
+        const queue = [...scanRuns];
+        const worker = async () => {
+            while (gen === _issuesScanGeneration && queue.length > 0) {
+                const run = queue.shift();
+                const record = await scanRunIssue(run);
+                if (gen !== _issuesScanGeneration) return;
+                applyIssueRecord(run, record);
+                state.scanned++;
+                state.runs = inFilter();
+                scheduleIssuesRender();
+            }
+        };
+        await Promise.all(Array.from({ length: Math.min(ISSUES_SCAN_CONCURRENCY, queue.length) }, worker));
+        if (gen !== _issuesScanGeneration) return;
+        state.done = true;
+        if (_issuesRenderTimer !== null) {
+            clearTimeout(_issuesRenderTimer);
+            _issuesRenderTimer = null;
+        }
+        renderIssuesPage(state);
+        for (const resolve of _issuesIdleResolvers.splice(0)) resolve();
+    } catch (err) {
+        if (gen !== _issuesScanGeneration) return;
+        renderFilterBanner(parseFilter(), []);
+        showError(err.message || "An unexpected error occurred.");
+        for (const resolve of _issuesIdleResolvers.splice(0)) resolve();
+    }
+}
+
 /* ─── Main ──────────────────────────────────────────────────── */
 async function init() {
     _viewMode = parseViewMode();
@@ -6873,6 +7459,12 @@ async function init() {
         setPageCopy(
             "Curate Sorting Results",
             'Open a successful run\'s postprocessed spike sorting in <a href="https://github.com/SpikeInterface/spikeinterface-gui" target="_blank" rel="noopener">SpikeInterface GUI</a>, streamed directly from the DANDI Archive.'
+        );
+    }
+    if (_viewMode === "issues") {
+        setPageCopy(
+            "Common Issues in Failed Jobs",
+            `The most frequent errors across failed pipeline jobs, read from each job's Nextflow log in the <a href="?view=dashboard&status=failed">main queue</a> (Dandiset ${DERIVATIVES_DANDISET_ID}) and the <a href="?view=archive">failed-runs archive</a> (Dandiset ${ARCHIVE_DANDISET_ID}).`
         );
     }
     if (_viewMode === "status") {
@@ -6953,6 +7545,10 @@ async function init() {
     // The live squeue snapshot heads the dashboard, above the page title, with
     // the always-on infrastructure jobs left out (the Status page shows them).
     if (_viewMode === "dashboard") initSqueueMonitor({ hiddenJobNames: SQUEUE_INFRASTRUCTURE_JOB_NAMES });
+    if (_viewMode === "issues") {
+        await loadIssuesData();
+        return;
+    }
     // Top display of current queue scheduling priorities. Irrelevant to the
     // archive page, which shows already-completed (failed) runs.
     if (_viewMode !== "archive") initQueuePriorities();
@@ -7064,6 +7660,14 @@ if (typeof module !== "undefined" && module.exports) {
         showDiffResults,
         showLoading,
         showResults,
+        extractLogFailure,
+        normalizeIssueSignature,
+        groupIssues,
+        issueRecordFromLog,
+        loadIssuesData,
+        renderIssuesPage,
+        issuesScanIdle,
+        ISSUE_SOURCE_LABELS,
         TEST_DANDISETS,
         DANDISET_SUBJECT_DEFAULTS,
         resolveSubject,

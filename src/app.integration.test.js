@@ -1203,3 +1203,258 @@ describe("progressive queue loading", () => {
         });
     });
 });
+
+describe("common issues page", () => {
+    const { clearBlobMemoryCache, loadIssuesData, issuesScanIdle, renderIssuesPage } = require("./app");
+    const MAIN_MANIFEST_URL = "https://dandiarchive.s3.amazonaws.com/dandisets/001697/draft/assets.jsonld";
+    const ARCHIVE_MANIFEST_URL = "https://dandiarchive.s3.amazonaws.com/dandisets/001873/draft/assets.jsonld";
+    const blobUrlFor = (id) => `https://dandiarchive.s3.amazonaws.com/blobs/${id.slice(0, 3)}/${id.slice(3, 6)}/${id}`;
+    let originalFetch;
+
+    const logFor = (process, message, exit = 1) =>
+        [
+            `Oct-03 23:55:01.001 [TaskFinalizer-1] ERROR nextflow.processor.TaskProcessor - Error executing process > '${process} (${process})'`,
+            "Caused by:",
+            `  Process \`${process} (${process})\` terminated with an error exit status (${exit})`,
+            "Command exit status:",
+            `  ${exit}`,
+            "Command error:",
+            "  Traceback (most recent call last):",
+            `  ${message}`,
+            "Work dir:",
+            "  /work/aa/bb",
+        ].join("\n");
+
+    // One queue state: `jobs` is [{ id, dandiset, subject, version, status, log }].
+    function tablesFor(prefix, jobs) {
+        const header =
+            "job_id\tdandiset_id\twithin_dandiset_path\tpipeline\tversion\tparams\tconfig\tcodebase\tcontent_id\tasset_size_bytes\tstatus\tcreated_at";
+        const jobRows = [];
+        const pathRows = [];
+        const blobs = new Map();
+        jobs.forEach((job, i) => {
+            const capsule = `derivatives/dandisets-000/dandiset-${job.dandiset}/sub-${job.subject}/sub-${job.subject}_ecephys/pipeline-aind+ephys/${job.id}`;
+            jobRows.push(
+                [
+                    job.id,
+                    job.dandiset,
+                    `sub-${job.subject}/sub-${job.subject}_ecephys.nwb`,
+                    "aind+ephys",
+                    job.version,
+                    "p",
+                    "c",
+                    "",
+                    "cid",
+                    "",
+                    job.status,
+                    `2026-10-0${i + 1}T00:00:00Z`,
+                ].join("\t")
+            );
+            pathRows.push(`${job.id}\t${capsule}/dataset_description.json\t${prefix}dd${i}`);
+            if (job.log !== undefined) {
+                const id = `${prefix}log${String(i).padStart(28, "0")}`;
+                pathRows.push(`${job.id}\t${capsule}/logs/nextflow.log\t${id}`);
+                pathRows.push(`${job.id}\t${capsule}/logs/trace.txt\t${prefix}tr${i}`);
+                blobs.set(blobUrlFor(id), job.log);
+            }
+        });
+        const jobsId = `${prefix}jobs${"0".repeat(26)}`;
+        const pathsId = `${prefix}paths${"0".repeat(25)}`;
+        blobs.set(blobUrlFor(jobsId), [header, ...jobRows].join("\n") + "\n");
+        blobs.set(blobUrlFor(pathsId), ["job_id\tpath\tcontent_id", ...pathRows].join("\n") + "\n");
+        const manifest = JSON.stringify([
+            { path: "derivatives/jobs.tsv", contentUrl: [blobUrlFor(jobsId)] },
+            { path: "derivatives/paths.tsv", contentUrl: [blobUrlFor(pathsId)] },
+        ]);
+        return { manifest, blobs };
+    }
+
+    function installFetch(main, archive) {
+        global.fetch = vi.fn(async (url) => {
+            const u = String(url);
+            if (u === MAIN_MANIFEST_URL) return new Response(main.manifest, { status: 200 });
+            if (u === ARCHIVE_MANIFEST_URL) return new Response(archive.manifest, { status: 200 });
+            if (u.includes("registered_params.json") || u.includes("registered_configs.json")) {
+                return new Response(JSON.stringify({}), { status: 200 });
+            }
+            const body = main.blobs.get(u) ?? archive.blobs.get(u);
+            if (body !== undefined) return new Response(body, { status: 200 });
+            return new Response(null, { status: 404 });
+        });
+    }
+
+    const MAIN = () =>
+        tablesFor("aaa", [
+            {
+                id: "job-000000000001",
+                dandiset: "000111",
+                subject: "a",
+                version: "1.4.0",
+                status: "failed",
+                log: logFor("preprocessing", "ValueError: No spikes detected (0 found)"),
+            },
+            {
+                id: "job-000000000002",
+                dandiset: "000111",
+                subject: "b",
+                version: "1.4.0",
+                status: "failed",
+                log: logFor("job_dispatch", "RuntimeError: File /blobs/1/2/x is not an existing file or folder!"),
+            },
+            { id: "job-000000000003", dandiset: "000222", subject: "c", version: "1.3.3", status: "successful" },
+            {
+                id: "job-000000000004",
+                dandiset: "001849",
+                subject: "t",
+                version: "1.4.0",
+                status: "failed",
+                log: logFor("preprocessing", "ValueError: test dandiset"),
+            },
+        ]);
+    const ARCHIVE = () =>
+        tablesFor("bbb", [
+            {
+                id: "job-000000000005",
+                dandiset: "000333",
+                subject: "d",
+                version: "v1.2.4",
+                status: "failed",
+                log: logFor("job_dispatch", "RuntimeError: File /blobs/9/8/y is not an existing file or folder!"),
+            },
+            {
+                id: "job-000000000006",
+                dandiset: "000333",
+                subject: "e",
+                version: "v1.2.4",
+                status: "failed",
+                log: logFor("preprocessing", "ValueError: No spikes detected (3 found)"),
+            },
+            { id: "job-000000000007", dandiset: "000333", subject: "f", version: "v1.2.4", status: "stalled" },
+            { id: "job-000000000008", dandiset: "000444", subject: "g", version: "v1.2.4", status: "failed" }, // no logs at all
+        ]);
+
+    beforeEach(() => {
+        document.body.innerHTML = `
+            <div id="loading"></div>
+            <div id="error"></div>
+            <div id="filter-banner"></div>
+            <div id="summary"></div>
+            <div id="layout-bar"></div>
+            <div id="runs"></div>
+        `;
+        sessionStorage.clear();
+        // Fixture blob ids repeat across tests; the cross-test memory cache
+        // must not serve one test's logs to the next.
+        clearBlobMemoryCache();
+        originalFetch = global.fetch;
+    });
+
+    afterEach(() => {
+        global.fetch = originalFetch;
+        sessionStorage.clear();
+        window.history.replaceState(null, "", "/");
+    });
+
+    it("scans both sources, groups failed jobs by normalized error, and ranks by frequency", async () => {
+        window.history.replaceState(null, "", "/?view=issues");
+        installFetch(MAIN(), ARCHIVE());
+
+        await loadIssuesData();
+        await issuesScanIdle();
+
+        const summary = document.getElementById("summary");
+        const statValues = [...summary.querySelectorAll(".stat-item")].map((el) => ({
+            label: el.querySelector(".stat-label").textContent,
+            value: el.querySelector(".stat-value").textContent.replace(/\s+/g, " ").trim(),
+        }));
+        // 2 main failures (test dandiset 001849 excluded, like the dashboard) + 3 archive failures (stalled excluded)
+        expect(statValues).toEqual([
+            { label: "Failed Jobs", value: "5" },
+            { label: "Distinct Issues", value: "2" },
+            { label: "Logs Scanned", value: "5 / 5" },
+            { label: "No Error Details", value: "1" },
+        ]);
+
+        const groups = [...document.querySelectorAll(".issue-group")];
+        expect(groups.map((group) => group.querySelector(".issue-count-value").textContent)).toEqual(["2", "2", "1"]);
+        const messages = groups.map((group) => group.querySelector(".issue-message").textContent);
+        expect(messages.slice(0, 2).sort()).toEqual([
+            "RuntimeError: File <path> is not an existing file or folder!",
+            "ValueError: No spikes detected (<n> found)",
+        ]);
+        expect(messages[2]).toBe("No error details found in the job's logs");
+        expect(groups[2].className).toContain("issue-group-nodetails");
+
+        const spikes = groups.find((group) =>
+            group.querySelector(".issue-message").textContent.startsWith("ValueError")
+        );
+        expect(spikes.innerHTML).toContain("Main queue");
+        expect(spikes.innerHTML).toContain("Archive");
+        expect(spikes.querySelector(".issue-example code").textContent).toBe(
+            "ValueError: No spikes detected (0 found)"
+        );
+        const rows = [...spikes.querySelectorAll(".issue-jobs tbody tr")];
+        expect(rows).toHaveLength(2);
+        const links = rows.map((row) => row.querySelector(".issue-job-link").getAttribute("href"));
+        expect(links.some((href) => href.includes("view=dashboard") && href.includes("dandiset=000111"))).toBe(true);
+        expect(links.some((href) => href.includes("view=archive") && href.includes("dandiset=000333"))).toBe(true);
+        expect(rows[0].querySelector(".log-link")).not.toBeNull();
+        expect(document.getElementById("layout-bar").style.display).toBe("none");
+
+        // Filter banner: issues flavor, with Source instead of Status.
+        const banner = document.getElementById("filter-banner").innerHTML;
+        expect(banner).toContain("Common Issues");
+        expect(banner).toContain('name="source"');
+        expect(banner).not.toContain('name="status"');
+        expect(banner).toContain('name="view" value="issues"');
+        expect(banner).toContain("View all issues");
+    });
+
+    it("honors the source and failure-step filters", async () => {
+        window.history.replaceState(null, "", "/?view=issues&source=archive&failureStep=job-dispatch");
+        installFetch(MAIN(), ARCHIVE());
+
+        await loadIssuesData();
+        await issuesScanIdle();
+
+        // Only the archive manifest was consulted.
+        const fetched = global.fetch.mock.calls.map(([u]) => String(u));
+        expect(fetched).toContain(ARCHIVE_MANIFEST_URL);
+        expect(fetched).not.toContain(MAIN_MANIFEST_URL);
+
+        const groups = [...document.querySelectorAll(".issue-group")];
+        expect(groups).toHaveLength(1);
+        expect(groups[0].querySelector(".issue-message").textContent).toBe(
+            "RuntimeError: File <path> is not an existing file or folder!"
+        );
+        expect(document.getElementById("summary").querySelector(".stat-failed .stat-value").textContent).toBe("1");
+        const banner = document.getElementById("filter-banner").innerHTML;
+        expect(banner).toContain("Archive</a>");
+        expect(banner).toContain("Failed in job-dispatch");
+    });
+
+    it("reuses cached records instead of refetching logs on a reload", async () => {
+        window.history.replaceState(null, "", "/?view=issues&source=main");
+        installFetch(MAIN(), ARCHIVE());
+        await loadIssuesData();
+        await issuesScanIdle();
+        const logFetches = () => global.fetch.mock.calls.filter(([u]) => String(u).includes("aaalog")).length;
+        expect(logFetches()).toBe(2);
+
+        await loadIssuesData();
+        await issuesScanIdle();
+        expect(logFetches()).toBe(2);
+        expect([...document.querySelectorAll(".issue-group")]).toHaveLength(2);
+    });
+
+    it("renders an empty state and shows errors from the state fetch", async () => {
+        renderIssuesPage({ runs: [], scanned: 0, total: 0, filter: {}, done: true });
+        expect(document.getElementById("runs").textContent).toContain("No failed jobs match the current filter.");
+
+        window.history.replaceState(null, "", "/?view=issues");
+        global.fetch = vi.fn(async () => new Response(null, { status: 500 }));
+        await loadIssuesData();
+        expect(document.getElementById("error").style.display).toBe("");
+        expect(document.getElementById("error").textContent).toContain("HTTP 500");
+    });
+});

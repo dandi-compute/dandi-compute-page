@@ -52,6 +52,11 @@ open it in Chromium, and stub the external endpoints at the network boundary.
       (trace.txt, dataset_description.json, quality_control.json, visualization_output.json)
       as well as the resolved `jobs.tsv` and `paths.tsv` blobs themselves (same URL shape,
       so route by exact URL match on those specific blob ids, not just path prefix).
+    - `?view=issues` (Common Issues) fetches BOTH queue states above (or one, with
+      `source=main|archive`), then every failed job's `logs/nextflow.log` blob (its
+      `*_slurm.log` when there is none) to extract and group the terminal error. Stub
+      those log blobs by exact URL; an unstubbed one lands in the "No error details"
+      group. Wait for `.stat-scanning` to disappear for the finished scan.
 4. Load `http://localhost:8123/?view=dashboard` and wait for `#summary .summary-stats`;
    run cards are `.run-entry`. Count/inspect stubbed requests in the route handler
    to assert network behavior (e.g. blob requests are cache-hits on reload).
