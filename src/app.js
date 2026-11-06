@@ -2662,15 +2662,29 @@ function stopMonitors() {
 
 // The backup-status README's "Last update" line and Disk Space table:
 // { updated, partitions: [{ name, used, total, percent }] }. Partitions are
-// empty when the README has no such table.
+// empty when the README has no such table. Read line by line: the README is
+// fetched from another repository, so nothing here backtracks on its input.
+const BACKUP_SIZE_CELL_PATTERN = /^(\d[\d.]* [A-Za-z]+) \/ (\d[\d.]* [A-Za-z]+) \((\d+(?:\.\d+)?)%\)$/;
 function parseBackupStatus(markdown) {
-    const text = String(markdown ?? "");
-    const updated = /^Last update:\s*(.+?)\s*$/m.exec(text)?.[1] ?? null;
-    const section = /^##\s+Disk Space\s*$([\s\S]*?)(?=^##\s|(?![\s\S]))/m.exec(text)?.[1] ?? "";
+    let updated = null;
     const partitions = [];
-    const row = /^\|\s*([^|]+?)\s*\|\s*([\d.]+\s*[A-Za-z]+)\s*\/\s*([\d.]+\s*[A-Za-z]+)\s*\((\d+(?:\.\d+)?)%\)\s*\|/gm;
-    for (const match of section.matchAll(row)) {
-        partitions.push({ name: match[1], used: match[2], total: match[3], percent: Number(match[4]) });
+    let inDiskSpace = false;
+    for (const rawLine of String(markdown ?? "").split("\n")) {
+        const line = rawLine.trim();
+        if (updated === null && line.startsWith("Last update:")) {
+            updated = line.slice("Last update:".length).trim() || null;
+            continue;
+        }
+        if (line.startsWith("#")) {
+            inDiskSpace = line.replace(/\s+/g, " ") === "## Disk Space";
+            continue;
+        }
+        if (!inDiskSpace || !line.startsWith("|")) continue;
+        const cells = line.split("|").map((cell) => cell.trim());
+        // "| 001 | 791.56 TB / 967.57 TB (81.81%) |" splits into "", name, sizes, "".
+        const sizes = BACKUP_SIZE_CELL_PATTERN.exec(cells[2] ?? "");
+        if (!cells[1] || !sizes) continue;
+        partitions.push({ name: cells[1], used: sizes[1], total: sizes[2], percent: Number(sizes[3]) });
     }
     return { updated, partitions };
 }
