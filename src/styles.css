@@ -437,6 +437,149 @@ h1 {
 .squeue-stderr {
     color: var(--squeue-error);
 }
+/* The Use% badge: in the disk snapshot's table and bar, and on the backup meters. */
+.disk-pct {
+    display: inline-block;
+    padding: 0 6px;
+    border-radius: 3px;
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-weight: 600;
+    white-space: nowrap;
+}
+.disk-pct-ok {
+    color: var(--color-success);
+    background: rgba(76, 175, 130, 0.15);
+}
+.disk-pct-warn {
+    color: var(--color-stalled);
+    background: rgba(224, 123, 58, 0.15);
+}
+.disk-pct-critical {
+    color: var(--color-failed);
+    background: rgba(224, 92, 92, 0.15);
+}
+.disk-pct-unknown {
+    color: var(--color-text-secondary);
+    background: rgba(128, 128, 128, 0.15);
+}
+.disk-table + .disk-table {
+    margin-top: 14px;
+}
+
+/* ─── Status page ───────────────────────────────────────────── */
+.status-page {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+    margin-bottom: 40px;
+}
+.status-heading {
+    margin: 0 0 6px;
+    font-size: 1.25em;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+}
+.status-note {
+    margin: 0;
+    color: var(--color-text-secondary);
+    line-height: 1.5;
+}
+.status-note code {
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.9em;
+}
+.status-section .squeue-monitor {
+    margin-top: 14px;
+}
+
+/* The backup partitions, as meters in a card. */
+.backup-status {
+    margin-top: 14px;
+    padding: 16px 20px;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+}
+.backup-status-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 4px 16px;
+    margin-bottom: 12px;
+}
+.backup-status-title {
+    font-weight: 600;
+}
+.backup-status-source {
+    font-size: 0.85em;
+    color: var(--color-text-secondary);
+}
+.backup-status-source a {
+    color: var(--color-accent);
+    text-decoration: none;
+}
+.backup-status-source a:hover {
+    text-decoration: underline;
+}
+.backup-status-updated {
+    margin-right: 10px;
+}
+.backup-status-note {
+    margin: 0;
+    color: var(--color-text-secondary);
+}
+.backup-status-error {
+    color: var(--color-failed);
+}
+.disk-meter {
+    display: grid;
+    grid-template-columns: 4em minmax(80px, 1fr) auto auto;
+    align-items: center;
+    gap: 12px;
+    padding: 6px 0;
+}
+.disk-meter + .disk-meter {
+    border-top: 1px solid var(--color-border);
+}
+.disk-meter-name {
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-weight: 600;
+}
+.disk-meter-bar {
+    display: block;
+    height: 10px;
+    border-radius: 5px;
+    background: rgba(128, 128, 128, 0.18);
+    overflow: hidden;
+}
+.disk-meter-fill {
+    display: block;
+    height: 100%;
+    border-radius: 5px;
+    background: var(--color-success);
+}
+.disk-meter-warn .disk-meter-fill {
+    background: var(--color-stalled);
+}
+.disk-meter-critical .disk-meter-fill {
+    background: var(--color-failed);
+}
+.disk-meter-text {
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.9em;
+    color: var(--color-text-secondary);
+    white-space: nowrap;
+}
+@media (max-width: 600px) {
+    .disk-meter {
+        grid-template-columns: 4em 1fr auto;
+    }
+    .disk-meter-text {
+        grid-column: 2 / span 2;
+    }
+}
+
 @keyframes squeue-pulse {
     50% {
         opacity: 0.35;

@@ -17,14 +17,22 @@ const {
     isImmutableBlobUrl,
     fetchArchiveState,
     fetchLatestSqueueSnapshot,
+    fetchLatestDiskSnapshot,
     hideSqueueJobs,
     initSqueueMonitor,
+    initDiskMonitor,
     SQUEUE_INFRASTRUCTURE_JOB_NAMES,
     monitorDayBranch,
+    monitorRecordTime,
     refreshSqueueMonitor,
+    refreshDiskMonitor,
     renderSqueueMonitor,
-    squeueRecordTime,
-    stopSqueueMonitor,
+    renderDiskMonitor,
+    parseBackupStatus,
+    renderBackupStatus,
+    loadBackupStatus,
+    renderStatusPage,
+    stopMonitors,
     summarizeSqueueJobs,
     archiveStateCacheKey,
     fetchSlurmLogs,
@@ -4094,6 +4102,18 @@ describe("live squeue monitor", () => {
         "",
     ].join("\n");
 
+    // What launcher/disk.sh records: df of the home and project filesystems, then du of the home directory.
+    const DISK_STDOUT = [
+        "Mounted              Size  Used Avail Use%",
+        "/home/cb239          100G   45G   55G  45%",
+        "/orcd/data/dandi/001 968T  792T  176T  82%",
+        "/orcd/data/dandi/002 682T  634T   48T  93%",
+        "",
+        "Used       Path",
+        "12G        /home/cb239",
+        "",
+    ].join("\n");
+
     // Serve `files` (branch → path → text) for the global logs repository; anything else is a 404.
     // `branches`, when given, is what the GitHub API lists as the repository's monitor* branches.
     const BRANCHES_API =
@@ -4135,7 +4155,7 @@ describe("live squeue monitor", () => {
 
     afterEach(() => {
         global.fetch = originalFetch;
-        stopSqueueMonitor();
+        stopMonitors();
         vi.useRealTimers();
         document.body.innerHTML = "";
     });
@@ -4149,10 +4169,10 @@ describe("live squeue monitor", () => {
     });
 
     it("reads a snapshot's time from its record name as US Eastern wall time", () => {
-        expect(squeueRecordTime("14/20261105T144502-squeue")).toBe(Date.parse("2026-11-05T19:45:02Z"));
-        expect(squeueRecordTime("06/20260701T060000-squeue")).toBe(Date.parse("2026-07-01T10:00:00Z"));
-        expect(squeueRecordTime("20261105T144502-squeue")).toBeNull();
-        expect(squeueRecordTime(undefined)).toBeNull();
+        expect(monitorRecordTime("14/20261105T144502-squeue")).toBe(Date.parse("2026-11-05T19:45:02Z"));
+        expect(monitorRecordTime("06/20260701T060000-squeue")).toBe(Date.parse("2026-07-01T10:00:00Z"));
+        expect(monitorRecordTime("20261105T144502-squeue")).toBeNull();
+        expect(monitorRecordTime(undefined)).toBeNull();
     });
 
     it("tallies jobs by the ST column of squeue's table", () => {
@@ -4196,7 +4216,11 @@ describe("live squeue monitor", () => {
                 "https://github.com/dandi-compute/dandi-compute-global-logs/blob/monitor/2026-11-05/monitor/14/20261105T144502-squeue/stdout",
         });
         const urls = global.fetch.mock.calls.map(([url]) => url);
-        expect(urls[0]).toBe(`${RAW}/monitor/2026-11-05/monitor/LATEST`);
+        // The pointer by name first, then the one shared by every name (older day branches).
+        expect(urls.slice(0, 2)).toEqual([
+            `${RAW}/monitor/2026-11-05/monitor/LATEST-squeue`,
+            `${RAW}/monitor/2026-11-05/monitor/LATEST`,
+        ]);
         // The pointer is only needed when today has no branch.
         expect(urls.some((url) => url.includes("monitor/latest"))).toBe(false);
     });
@@ -4212,9 +4236,11 @@ describe("live squeue monitor", () => {
         expect(snapshot.branch).toBe("monitor/2026-11-02");
         expect(snapshot.recordName).toBe("06/20261102T065502-squeue");
         expect(snapshot.takenAt).toBe(Date.parse("2026-11-02T11:55:02Z"));
-        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 3)).toEqual([
+        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 5)).toEqual([
+            `${RAW}/monitor/2026-11-05/monitor/LATEST-squeue`,
             `${RAW}/monitor/2026-11-05/monitor/LATEST`,
             `${RAW}/monitor/latest/LATEST`,
+            `${RAW}/monitor/2026-11-02/monitor/LATEST-squeue`,
             `${RAW}/monitor/2026-11-02/monitor/LATEST`,
         ]);
     });
@@ -4236,17 +4262,58 @@ describe("live squeue monitor", () => {
         expect(snapshot.recordName).toBe("06/20261102T065502-squeue");
 
         // A pointer naming a day whose branch has since been deleted.
-        stopSqueueMonitor(); // forget the listing kept from the call above
+        stopMonitors(); // forget the listing kept from the call above
         global.fetch = serveGlobalLogs({ ...files, "monitor/latest": { LATEST: "monitor/2026-11-01\n" } }, listed);
         snapshot = await fetchLatestSqueueSnapshot(NOW);
         expect(snapshot.branch).toBe("monitor/2026-11-02");
-        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 5)).toEqual([
+        expect(global.fetch.mock.calls.map(([url]) => url).slice(0, 8)).toEqual([
+            `${RAW}/monitor/2026-11-05/monitor/LATEST-squeue`,
             `${RAW}/monitor/2026-11-05/monitor/LATEST`,
             `${RAW}/monitor/latest/LATEST`,
+            `${RAW}/monitor/2026-11-01/monitor/LATEST-squeue`,
             `${RAW}/monitor/2026-11-01/monitor/LATEST`,
             BRANCHES_API,
+            `${RAW}/monitor/2026-11-02/monitor/LATEST-squeue`,
             `${RAW}/monitor/2026-11-02/monitor/LATEST`,
         ]);
+    });
+
+    it("reads each kind of snapshot by its own pointer, and from LATEST only when that names its kind", async () => {
+        const squeueRecord = "14/20261105T144502-squeue";
+        const diskRecord = "14/20261105T143001-disk";
+        // A day branch from after the pointers were split by name: LATEST names the newest of any kind.
+        global.fetch = serveGlobalLogs({
+            "monitor/2026-11-05": {
+                "monitor/LATEST": `${squeueRecord}\n`,
+                "monitor/LATEST-squeue": `${squeueRecord}\n`,
+                "monitor/LATEST-disk": `${diskRecord}\n`,
+                [`monitor/${squeueRecord}/stdout`]: SQUEUE_STDOUT,
+                [`monitor/${diskRecord}/stdout`]: DISK_STDOUT,
+            },
+        });
+        expect((await fetchLatestSqueueSnapshot(NOW)).recordName).toBe(squeueRecord);
+        const disk = await fetchLatestDiskSnapshot(NOW);
+        expect(disk.recordName).toBe(diskRecord);
+        expect(disk.takenAt).toBe(Date.parse("2026-11-05T19:30:01Z"));
+        expect(disk.stdout).toBe(DISK_STDOUT);
+        expect(disk.sourceUrl).toBe(
+            "https://github.com/dandi-compute/dandi-compute-global-logs/blob/monitor/2026-11-05/monitor/14/20261105T143001-disk/stdout"
+        );
+
+        // A day branch from before: only LATEST, naming a squeue snapshot, which is no disk snapshot.
+        global.fetch = serveGlobalLogs({ "monitor/2026-11-05": snapshotFiles(squeueRecord) });
+        expect((await fetchLatestSqueueSnapshot(NOW)).recordName).toBe(squeueRecord);
+        expect(await fetchLatestDiskSnapshot(NOW)).toBeNull();
+
+        // LATEST naming a disk snapshot on a branch without LATEST-squeue (a runner that records disk
+        // snapshots but not yet by-name pointers) is no squeue snapshot either.
+        global.fetch = serveGlobalLogs({
+            "monitor/2026-11-05": {
+                "monitor/LATEST": `${diskRecord}\n`,
+                [`monitor/${diskRecord}/stdout`]: DISK_STDOUT,
+            },
+        });
+        expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
     });
 
     it("lists branches at most every 10 minutes and resolves to null when nothing leads to a snapshot", async () => {
@@ -4262,22 +4329,26 @@ describe("live squeue monitor", () => {
         expect(apiCalls()).toBe(2);
 
         // A malformed pointer, an unreachable API, or a listed branch that turns out to be gone.
-        stopSqueueMonitor();
+        stopMonitors();
         global.fetch = serveGlobalLogs(
             { "monitor/latest": { LATEST: "../../main\n" } },
             new TypeError("Failed to fetch")
         );
         expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
-        stopSqueueMonitor();
+        stopMonitors();
         global.fetch = serveGlobalLogs({}, ["monitor/2026-11-04"]);
         expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
         // The pointer and the listing naming the same missing day are tried once.
-        stopSqueueMonitor();
+        stopMonitors();
         global.fetch = serveGlobalLogs({ "monitor/latest": { LATEST: "monitor/2026-11-04\n" } }, [
             "monitor/2026-11-04",
         ]);
         expect(await fetchLatestSqueueSnapshot(NOW)).toBeNull();
-        expect(global.fetch.mock.calls.filter(([url]) => url.includes("2026-11-04/monitor/LATEST"))).toHaveLength(1);
+        // Each branch is asked once, for LATEST-squeue and then LATEST.
+        expect(global.fetch.mock.calls.filter(([url]) => url.endsWith("2026-11-04/monitor/LATEST"))).toHaveLength(1);
+        expect(
+            global.fetch.mock.calls.filter(([url]) => url.endsWith("2026-11-04/monitor/LATEST-squeue"))
+        ).toHaveLength(1);
     });
 
     it("tolerates a missing stderr or exit status but not an unreachable repository", async () => {
@@ -4585,6 +4656,108 @@ describe("live squeue monitor", () => {
         expect(monitor.querySelector(".squeue-screen").textContent).not.toContain("DANDI-Compute-Submitter");
     });
 
+    it("renders the disk snapshot as tables with the Use% column and chips coloured by how full", () => {
+        const snapshot = {
+            branch: "monitor/2026-11-05",
+            recordName: "14/20261105T143001-disk",
+            takenAt: Date.parse("2026-11-05T19:30:01Z"),
+            stdout: DISK_STDOUT,
+            stderr: "",
+            exitStatus: "0",
+            sourceUrl: "https://example.org/stdout",
+        };
+        const root = document.createElement("div");
+        root.innerHTML = renderDiskMonitor({ snapshot }, NOW.getTime());
+
+        expect(root.querySelector(".squeue-status").textContent).toBe("live");
+        expect(root.querySelector(".squeue-age").textContent).toBe("18 min ago");
+        // One chip per filesystem: its mount point and how full it is.
+        const chips = [...root.querySelectorAll(".squeue-tally .disk-pct")];
+        expect(chips.map((chip) => [chip.textContent, chip.className])).toEqual([
+            ["/home/cb239 45%", "disk-pct disk-pct-ok"],
+            ["/orcd/data/dandi/001 82%", "disk-pct disk-pct-warn"],
+            ["/orcd/data/dandi/002 93%", "disk-pct disk-pct-critical"],
+        ]);
+        // The df table, then the du table.
+        const tables = [...root.querySelectorAll(".squeue-screen table.disk-table")];
+        expect(tables).toHaveLength(2);
+        expect([...tables[0].querySelectorAll("thead th")].map((th) => th.textContent)).toEqual([
+            "Mounted",
+            "Size",
+            "Used",
+            "Avail",
+            "Use%",
+        ]);
+        const rows = [...tables[0].querySelectorAll("tbody tr")].map((tr) => [...tr.cells].map((td) => td.textContent));
+        expect(rows).toEqual([
+            ["/home/cb239", "100G", "45G", "55G", "45%"],
+            ["/orcd/data/dandi/001", "968T", "792T", "176T", "82%"],
+            ["/orcd/data/dandi/002", "682T", "634T", "48T", "93%"],
+        ]);
+        expect(
+            [...tables[0].querySelectorAll("tbody tr")].map((tr) => tr.cells[4].querySelector(".disk-pct").className)
+        ).toEqual(["disk-pct disk-pct-ok", "disk-pct disk-pct-warn", "disk-pct disk-pct-critical"]);
+        expect([...tables[1].querySelectorAll("thead th")].map((th) => th.textContent)).toEqual(["Used", "Path"]);
+        expect([...tables[1].querySelectorAll("tbody td")].map((td) => td.textContent)).toEqual(["12G", "/home/cb239"]);
+
+        // Three missed half-hourly snapshots are stale; output that is not a table stays text.
+        const later = document.createElement("div");
+        later.innerHTML = renderDiskMonitor(
+            {
+                snapshot: {
+                    ...snapshot,
+                    stdout: "df: /orcd/data/dandi/002: No such file or directory",
+                    exitStatus: "1",
+                },
+            },
+            snapshot.takenAt + 91 * 60 * 1000
+        );
+        expect(later.querySelector(".squeue-status").textContent).toBe("stale");
+        expect(later.querySelector(".squeue-tally")).toBeNull();
+        expect(later.querySelector(".squeue-screen pre.squeue-text").textContent).toBe(
+            "df: /orcd/data/dandi/002: No such file or directory"
+        );
+        expect(later.querySelector(".squeue-stderr").textContent).toBe("[exit status 1]");
+
+        const none = document.createElement("div");
+        none.innerHTML = renderDiskMonitor({ snapshot: null }, NOW.getTime());
+        expect(none.querySelector(".squeue-status").textContent).toBe("no snapshots");
+        expect(none.querySelector(".squeue-stderr").textContent).toBe(
+            "No disk snapshot found in dandi-compute-global-logs."
+        );
+    });
+
+    it("mounts the disk monitor into its container and polls it on its own", async () => {
+        vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+        vi.setSystemTime(NOW);
+        document.body.innerHTML = `<div class="page-content"><h1>Cluster Status</h1><div id="status-disk"></div></div>`;
+        const record = "14/20261105T143001-disk";
+        global.fetch = serveGlobalLogs({
+            "monitor/2026-11-05": {
+                "monitor/LATEST": `${record}\n`,
+                "monitor/LATEST-disk": `${record}\n`,
+                [`monitor/${record}/stdout`]: DISK_STDOUT,
+            },
+        });
+
+        await initDiskMonitor({ container: document.getElementById("status-disk") });
+        const monitor = document.getElementById("disk-monitor");
+        expect(monitor.parentElement.id).toBe("status-disk");
+        expect(monitor.getAttribute("aria-label")).toBe("Latest disk usage snapshot from MIT Engaging");
+        expect(monitor.querySelector(".squeue-status").textContent).toBe("live");
+        expect(monitor.querySelectorAll(".squeue-tally .disk-pct")).toHaveLength(3);
+        expect(document.getElementById("squeue-monitor")).toBeNull();
+
+        // Polled every 5 minutes, not every minute like the queue.
+        const loads = global.fetch.mock.calls.length;
+        vi.advanceTimersByTime(60 * 1000);
+        expect(global.fetch.mock.calls.length).toBe(loads);
+        vi.advanceTimersByTime(4 * 60 * 1000);
+        expect(global.fetch.mock.calls.length).toBeGreaterThan(loads);
+        await refreshDiskMonitor();
+        expect(monitor.querySelector(".squeue-age").textContent).toBe("23 min ago");
+    });
+
     it("does nothing on a page without the page content container", async () => {
         global.fetch = vi.fn();
         await initSqueueMonitor();
@@ -4643,5 +4816,139 @@ describe("live squeue monitor", () => {
         } finally {
             visibilityState.mockRestore();
         }
+    });
+});
+
+describe("DANDI backup partitions and the Status page", () => {
+    const README = [
+        "# DANDI Backup Status",
+        "",
+        "Current status of S3 bucket backup of the DANDI Archive.",
+        "",
+        "Last update: November 2, 2026 at 06:09 AM ET",
+        "",
+        "## Disk Space",
+        "",
+        "|   Partition | Size (Used / Total)            |",
+        "| ----------: | :----------------------------- |",
+        "|         001 | 791.56 TB / 967.57 TB (81.81%) |",
+        "|         002 | 416.05 TB / 681.70 TB (61.03%) |",
+        "",
+        "## Content",
+        "",
+        "| Location      | Size (Local / Remote)           |",
+        "| :------------ | :------------------------------ |",
+        "| blobs/        | 1.21 PB / 1.28 PB (94.23%)      |",
+        "",
+    ].join("\n");
+    let originalFetch;
+
+    beforeEach(() => {
+        originalFetch = global.fetch;
+    });
+
+    afterEach(() => {
+        global.fetch = originalFetch;
+        stopMonitors();
+        document.body.innerHTML = "";
+    });
+
+    it("reads the partitions and the update time from the README's Disk Space table only", () => {
+        expect(parseBackupStatus(README)).toEqual({
+            updated: "November 2, 2026 at 06:09 AM ET",
+            partitions: [
+                { name: "001", used: "791.56 TB", total: "967.57 TB", percent: 81.81 },
+                { name: "002", used: "416.05 TB", total: "681.70 TB", percent: 61.03 },
+            ],
+        });
+        expect(parseBackupStatus("# Nothing here\n")).toEqual({ updated: null, partitions: [] });
+        expect(parseBackupStatus(undefined)).toEqual({ updated: null, partitions: [] });
+        // A Disk Space section that ends the file still parses.
+        const last = README.slice(0, README.indexOf("## Content"));
+        expect(parseBackupStatus(last).partitions).toHaveLength(2);
+    });
+
+    it("renders the partitions as meters coloured by how full they are, with the sizes beside them", () => {
+        const root = document.createElement("div");
+        root.innerHTML = renderBackupStatus({
+            status: {
+                updated: "November 2, 2026 at 06:09 AM ET",
+                partitions: [
+                    { name: "001", used: "791.56 TB", total: "967.57 TB", percent: 81.81 },
+                    { name: "002", used: "416.05 TB", total: "681.70 TB", percent: 61.03 },
+                    { name: "003", used: "9 TB", total: "9 TB", percent: 100 },
+                ],
+            },
+        });
+        expect(root.querySelector(".backup-status-updated").textContent).toBe(
+            "Last update: November 2, 2026 at 06:09 AM ET"
+        );
+        expect(root.querySelector(".backup-status-source a").href).toBe("https://github.com/dandi/backup-status");
+        const meters = [...root.querySelectorAll(".disk-meter")];
+        expect(meters.map((m) => m.className)).toEqual([
+            "disk-meter disk-meter-warn",
+            "disk-meter disk-meter-ok",
+            "disk-meter disk-meter-critical",
+        ]);
+        expect(meters.map((m) => m.getAttribute("aria-valuenow"))).toEqual(["81.81", "61.03", "100"]);
+        expect(meters.map((m) => m.querySelector(".disk-meter-fill").style.width)).toEqual([
+            "81.81%",
+            "61.03%",
+            "100%",
+        ]);
+        expect(meters.map((m) => m.querySelector(".disk-meter-text").textContent)).toEqual([
+            "791.56 TB / 967.57 TB",
+            "416.05 TB / 681.70 TB",
+            "9 TB / 9 TB",
+        ]);
+        expect(meters.map((m) => m.querySelector(".disk-pct").textContent)).toEqual(["81.81%", "61.03%", "100%"]);
+
+        const loading = document.createElement("div");
+        loading.innerHTML = renderBackupStatus();
+        expect(loading.querySelector(".backup-status-note").textContent).toBe("Loading…");
+        const failed = document.createElement("div");
+        failed.innerHTML = renderBackupStatus({ error: "Could not load <it>" });
+        expect(failed.querySelector(".backup-status-error").textContent).toBe("Could not load <it>");
+        const empty = document.createElement("div");
+        empty.innerHTML = renderBackupStatus({ status: { updated: null, partitions: [] } });
+        expect(empty.querySelector(".backup-status-note").textContent).toBe("No Disk Space table found in the README.");
+        expect(empty.querySelector(".backup-status-updated")).toBeNull();
+    });
+
+    it("loads the README from the repository's main branch and shows a failure in place", async () => {
+        const el = document.createElement("div");
+        global.fetch = vi.fn(async () => new Response(README, { status: 200 }));
+        await loadBackupStatus(el);
+        expect(global.fetch).toHaveBeenCalledWith(
+            "https://raw.githubusercontent.com/dandi/backup-status/main/README.md"
+        );
+        expect(el.querySelectorAll(".disk-meter")).toHaveLength(2);
+
+        global.fetch = vi.fn(async () => new Response("", { status: 503 }));
+        await loadBackupStatus(el);
+        expect(el.querySelector(".backup-status-error").textContent).toBe(
+            "Could not load dandi/backup-status: HTTP 503"
+        );
+
+        global.fetch = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
+        await loadBackupStatus(el);
+        expect(el.querySelector(".backup-status-error").textContent).toBe(
+            "Could not load dandi/backup-status: Failed to fetch"
+        );
+        await expect(loadBackupStatus(null)).resolves.toBeUndefined();
+    });
+
+    it("lays the Status page out as a queue section and a disk section with their containers", () => {
+        const root = document.createElement("div");
+        root.innerHTML = renderStatusPage();
+        expect([...root.querySelectorAll(".status-heading")].map((h) => h.textContent)).toEqual(["Queue", "Disk"]);
+        const queue = root.querySelector("#status-queue-heading").closest(".status-section");
+        expect(queue.querySelector("#status-queue")).not.toBeNull();
+        const disk = root.querySelector("#status-disk-heading").closest(".status-section");
+        // The backup partitions come before the cluster's own disk snapshot.
+        expect([...disk.querySelectorAll("#backup-status, #status-disk")].map((d) => d.id)).toEqual([
+            "backup-status",
+            "status-disk",
+        ]);
     });
 });
