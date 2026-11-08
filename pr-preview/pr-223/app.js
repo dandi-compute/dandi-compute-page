@@ -443,13 +443,14 @@ function applyFilter(runs, filter) {
 
 /* Build a page URL with the given filter parameters.
    When on a named dashboard page (dashboard, tests, or archive), the matching
-   view param is automatically preserved so navigation stays within that scope. */
-function narrowUrl(params) {
+   view param is automatically preserved so navigation stays within that scope;
+   pass `view` to link into a queue view from elsewhere (e.g. the Status page). */
+function narrowUrl(params, view = _viewMode) {
     const sp = new URLSearchParams();
     sp.set("layout", parseLayoutMode());
     sp.set("sort", parseSortMode());
     sp.set("sortDir", parseSortDirection());
-    if (QUEUE_VIEW_MODES.has(_viewMode)) sp.set("view", _viewMode);
+    if (QUEUE_VIEW_MODES.has(view)) sp.set("view", view);
     if (params.dandiset) sp.set("dandiset", params.dandiset);
     if (params.subject) sp.set("subject", params.subject);
     if (params.session) sp.set("session", params.session);
@@ -1052,8 +1053,9 @@ function renderSearchForm() {
 </form>`;
 }
 
-// The line under the search: how many jobs it shows, whether the typed search
-// is yet to be applied, and any terms that could not be used as typed.
+// The line under the search: how many jobs an applied search shows, whether
+// the typed search is yet to be applied, and any terms that could not be used
+// as typed.
 function updateSearchStatus(form) {
     const input = form.querySelector(".run-search-input");
     const status = form.querySelector(".run-search-status");
@@ -1061,19 +1063,17 @@ function updateSearchStatus(form) {
     if (!input || !status || !clear) return;
     const { problems } = searchTermsToParams(parseSearchTerms(input.value));
     const parts = [];
-    if (_searchRuns.length > 0) {
-        // The Common Issues page ignores any status filter (every job failed).
-        const filter = _viewMode === "issues" ? { ..._searchFilter, status: null } : _searchFilter;
-        parts.push(
-            isFilterActive(filter)
-                ? `Showing ${applyFilter(_searchRuns, filter).length} of ${_searchRuns.length} ${searchNoun()}.`
-                : `${_searchRuns.length} ${searchNoun()}.`
-        );
+    // The Common Issues page ignores any status filter (every job failed).
+    const filter = _viewMode === "issues" ? { ..._searchFilter, status: null } : _searchFilter;
+    if (_searchRuns.length > 0 && isFilterActive(filter)) {
+        parts.push(`Showing ${applyFilter(_searchRuns, filter).length} of ${_searchRuns.length} ${searchNoun()}.`);
     }
     if (isSearchPending(input.value)) parts.push("Press Enter to apply.");
     parts.push(...problems);
     status.textContent = parts.join(" ");
     clear.hidden = !input.value.trim() && !isFilterActive(_searchFilter);
+    // Nothing to say (no search applied or typed): no empty line under the bar.
+    form.querySelector(".run-search-summary").hidden = !status.textContent && clear.hidden;
 }
 
 function refreshSearchStatus() {
@@ -2473,7 +2473,8 @@ function fieldTipAttrs(field) {
 }
 
 // Ordered priority chips (rank + value), optionally linking each value into the
-// dashboard filter named by linkKey (e.g. "pipelineVersion" → ?version=…).
+// dashboard filter named by linkKey (e.g. "pipelineVersion" → ?version=…). The
+// card lives on the Status page, so the links name the dashboard view.
 function renderQueuePriorityChips(values, linkKey) {
     const items = (Array.isArray(values) ? values : []).filter((v) => v !== null && v !== undefined);
     if (!items.length) return `<span class="qp-empty">—</span>`;
@@ -2481,7 +2482,7 @@ function renderQueuePriorityChips(values, linkKey) {
         .map((v, i) => {
             const label = e(String(v));
             const inner = linkKey
-                ? `<a class="qp-chip-link" href="${e(narrowUrl({ [linkKey]: String(v) }))}" title="Filter dashboard to ${label}">${label}</a>`
+                ? `<a class="qp-chip-link" href="${e(narrowUrl({ [linkKey]: String(v) }, "dashboard"))}" title="Filter dashboard to ${label}">${label}</a>`
                 : `<span class="qp-chip-label">${label}</span>`;
             return `<li class="qp-chip"><span class="qp-rank">${i + 1}</span>${inner}</li>`;
         })
@@ -2567,7 +2568,7 @@ function renderQueueAdaptiveBody(config) {
         const itemsHtml = items
             .map((it, i) => {
                 const labelHtml = isDandisetId(it.label)
-                    ? `<a class="qp-label qp-label-link" href="${e(narrowUrl({ dandiset: it.label }))}" title="Filter dashboard to Dandiset ${e(it.label)}">${e(it.label)}</a>`
+                    ? `<a class="qp-label qp-label-link" href="${e(narrowUrl({ dandiset: it.label }, "dashboard"))}" title="Filter dashboard to Dandiset ${e(it.label)}">${e(it.label)}</a>`
                     : `<span class="qp-label">${e(it.label)}</span>`;
                 const prio =
                     it.priority !== null
@@ -2608,23 +2609,8 @@ function renderQueuePriorities(config) {
 ${body}`;
 }
 
-// Insert the queue-priorities container at the top of the page content (once).
-function mountQueuePriorities() {
-    let el = document.getElementById("queue-priorities");
-    if (el) return el;
-    const pageContent = document.querySelector(".page-content");
-    if (!pageContent) return null;
-    el = document.createElement("section");
-    el.id = "queue-priorities";
-    el.className = "queue-priorities";
-    el.style.display = "none";
-    const banner = document.getElementById("filter-banner");
-    pageContent.insertBefore(el, banner ?? pageContent.firstChild);
-    return el;
-}
-
-async function initQueuePriorities() {
-    const el = mountQueuePriorities();
+// Fill the queue-priorities card (the Status page's, see renderStatusPage).
+async function initQueuePriorities(el = document.getElementById("queue-priorities")) {
     if (!el) return;
     const config = await fetchQueueConfig();
     const html = renderQueuePriorities(config);
@@ -3431,8 +3417,9 @@ function renderStatusPage() {
 <div class="status-page">
     <section class="status-section" aria-labelledby="status-queue-heading">
         <h2 class="status-heading" id="status-queue-heading">Queue</h2>
-        <p class="status-note">Every DANDI Compute job on MIT Engaging, including the always-on queue submitter, as of the latest <code>squeue</code> snapshot (taken every 5 minutes).</p>
+        <p class="status-note">Every DANDI Compute job on MIT Engaging, including the always-on queue submitter, as of the latest <code>squeue</code> snapshot (taken every 5 minutes), then the priorities the queue submits new jobs by.</p>
         <div id="status-queue"></div>
+        <div id="queue-priorities" class="queue-priorities" style="display: none"></div>
     </section>
     <section class="status-section" aria-labelledby="status-disk-heading">
         <h2 class="status-heading" id="status-disk-heading">Disk</h2>
@@ -8111,6 +8098,7 @@ async function init() {
         document.getElementById("runs").innerHTML = renderStatusPage();
         showDiffResults();
         initSqueueMonitor({ container: document.getElementById("status-queue") });
+        initQueuePriorities();
         initDiskMonitor({ container: document.getElementById("status-disk") });
         loadBackupStatus(document.getElementById("backup-status"));
         return;
@@ -8181,9 +8169,6 @@ async function init() {
         await loadIssuesData();
         return;
     }
-    // Top display of current queue scheduling priorities. Irrelevant to the
-    // archive page, which shows already-completed (failed) runs.
-    if (_viewMode !== "archive") initQueuePriorities();
     await loadQueueData();
 }
 
