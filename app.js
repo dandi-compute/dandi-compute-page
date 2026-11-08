@@ -652,10 +652,6 @@ function renderFilterBanner(filter, availableRuns = []) {
             label: "🧪 Tests",
             desc: "Showing internal test runs only (Dandiset 001849)",
         },
-        archive: {
-            label: "🗄️ Archive",
-            desc: "Showing archived failing runs only (separate from the main queue)",
-        },
         issues: {
             label: "🧩 Common Issues",
             desc: "Most frequent errors across failed jobs, from the main queue and the failed-runs archive",
@@ -7564,10 +7560,7 @@ async function init() {
         return;
     }
     if (_viewMode === "archive") {
-        setPageCopy(
-            "Archived Pipeline Runs",
-            `Failing runs that have been archived from the main queue, sourced from <a href="${dandiBaseUrl(ARCHIVE_DANDISET_ID)}/dandiset/${ARCHIVE_DANDISET_ID}/draft/files?location=derivatives" target="_blank" rel="noopener">Dandiset ${ARCHIVE_DANDISET_ID}'s jobs.tsv</a>.`
-        );
+        setPageCopy("Archived Pipeline Runs", "Failed runs that have been archived from the main collection.");
     }
 
     showLoading();
