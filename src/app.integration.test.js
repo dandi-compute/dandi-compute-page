@@ -264,6 +264,7 @@ describe("app integration behavior", () => {
         const banner = document.getElementById("filter-banner");
         expect(banner.querySelector(".run-search-input").value).toBe("status:failed");
         expect(banner.querySelector(".run-search-status").textContent).toBe("Showing 1 of 2 jobs.");
+        expect(banner.querySelector(".run-search-summary").hidden).toBe(false);
         // Status suggestions only offer statuses some job has.
         expect(suggest("status:")).toEqual(["status:failed", "status:success"]);
     });
@@ -1482,7 +1483,8 @@ describe("common issues page", () => {
         // Search bar: issues flavor, with source: instead of status:.
         const banner = document.getElementById("filter-banner");
         expect(banner.innerHTML).toContain("Common Issues");
-        expect(banner.querySelector(".run-search-status").textContent).toBe("5 failed jobs.");
+        // No search applied: no line under the bar.
+        expect(banner.querySelector(".run-search-summary").hidden).toBe(true);
         const input = banner.querySelector(".run-search-input");
         input.value = "";
         input.dispatchEvent(new Event("input", { bubbles: true }));

@@ -2085,6 +2085,8 @@ describe("renderVisualizationSection", () => {
         expect(html).toContain("Version priority");
         expect(html).toContain("Params priority");
         expect(html).toContain("version=v1");
+        // The card is on the Status page, so its links name the dashboard.
+        expect(html).toContain("view=dashboard&amp;version=v1");
         expect(html).toContain('<span class="qp-chip-label">fast</span>');
         expect(html).not.toContain('href="?params=');
         expect(html).toContain("Max attempts per asset");
@@ -5322,7 +5324,11 @@ describe("DANDI backup partitions and the Status page", () => {
         root.innerHTML = renderStatusPage();
         expect([...root.querySelectorAll(".status-heading")].map((h) => h.textContent)).toEqual(["Queue", "Disk"]);
         const queue = root.querySelector("#status-queue-heading").closest(".status-section");
-        expect(queue.querySelector("#status-queue")).not.toBeNull();
+        // The queue priorities card follows the live queue.
+        expect([...queue.querySelectorAll("#status-queue, #queue-priorities")].map((d) => d.id)).toEqual([
+            "status-queue",
+            "queue-priorities",
+        ]);
         const disk = root.querySelector("#status-disk-heading").closest(".status-section");
         // The backup partitions come before the cluster's own disk snapshot.
         expect([...disk.querySelectorAll("#backup-status, #status-disk")].map((d) => d.id)).toEqual([

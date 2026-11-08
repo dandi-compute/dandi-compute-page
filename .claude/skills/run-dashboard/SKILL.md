@@ -46,7 +46,8 @@ open it in Chromium, and stub the external endpoints at the network boundary.
     - `https://raw.githubusercontent.com/dandi/backup-status/main/README.md` — the DANDI Archive
       backup partitions on `?view=status`, read from the README's `## Disk Space` table
       (`| 001 | 791.56 TB / 967.57 TB (81.81%) |` rows) and its `Last update:` line.
-    - `.../code/main/src/dandi_compute_code/queue/pipeline_configs.json` — priorities banner.
+    - `.../code/main/src/dandi_compute_code/queue/pipeline_configs.json` — the queue priorities card
+      on `?view=status` (under the queue).
     - `.../code/main/...registered_params.json` / `registered_configs.json` — registries.
     - `https://dandiarchive.s3.amazonaws.com/blobs/<3>/<3>/<id>` — per-run artifacts
       (trace.txt, dataset_description.json, quality_control.json, visualization_output.json)
