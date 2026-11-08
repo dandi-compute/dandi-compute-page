@@ -465,6 +465,11 @@ h1 {
 .disk-table + .disk-table {
     margin-top: 14px;
 }
+.disk-table caption {
+    padding-top: 10px;
+    color: var(--squeue-dim);
+    text-align: left;
+}
 
 /* ─── Status page ───────────────────────────────────────────── */
 .status-page {
