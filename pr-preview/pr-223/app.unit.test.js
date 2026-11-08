@@ -1,6 +1,7 @@
 const {
     applyFilter,
     compareVersionsDescending,
+    liveSearchText,
     filterToSearchText,
     parseFilter,
     parseSearchTerms,
@@ -2511,6 +2512,24 @@ describe("compareVersionsDescending", () => {
     it("ties versions that differ only in a v prefix or build metadata", () => {
         expect(compareVersionsDescending("v1.2.4", "1.2.4")).toBe(0);
         expect(compareVersionsDescending("v1.0.1+20abeb6", "1.0.1")).toBe(0);
+    });
+});
+
+describe("liveSearchText", () => {
+    const runs = [{ pipelineName: "aind+ephys", pipelineVersion: "1.5.0", status: "failed" }];
+
+    it.each([
+        ["keeps finished keyed terms", "pipeline:aind-ephys version:1.5.0", "pipeline:aind-ephys version:1.5.0"],
+        ["accepts a pipeline in either spelling", "pipeline:aind+ephys", "pipeline:aind+ephys"],
+        ["drops a value no job has yet", "pipeline:aind version:1.5", ""],
+        ["drops a key still awaiting its value", "status:", ""],
+        ["drops an invalid size", "size:>", ""],
+        ["keeps a valid size", "size:>1", "size:>1"],
+        ["holds a word at the caret that may become a key", "status:failed vers", "status:failed"],
+        ["applies free text that can't become a key", "status:failed 1.5", "status:failed 1.5"],
+        ["applies a key-like word once the caret has moved on", "vers status:failed", "vers status:failed"],
+    ])("%s", (_, text, expected) => {
+        expect(liveSearchText(text, text.length, runs)).toBe(expected);
     });
 });
 

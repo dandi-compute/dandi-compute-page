@@ -101,8 +101,8 @@ describe("app integration behavior", () => {
             "1",
             "1",
         ]);
-        // Typing a draft flags it as not yet applied.
-        expect(banner.querySelector(".run-search-status").textContent).toContain("Press Enter to apply.");
+        // The search applies as it is typed, so a draft needs no "Press Enter".
+        expect(banner.querySelector(".run-search-status").hidden).toBe(true);
     });
 
     it("updates page state displays and escapes error content", () => {
@@ -1268,6 +1268,85 @@ describe("progressive queue loading", () => {
             await hydrationIdle();
         });
 
+        // Type into the search bar (caret at the end), as a keystroke would.
+        const type = (text) => {
+            const input = document.querySelector(".run-search-input");
+            input.value = text;
+            input.setSelectionRange(text.length, text.length);
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+        };
+        const pause = () => new Promise((resolve) => setTimeout(resolve, 300));
+
+        it("applies a typed search in place once typing pauses, keeping the text, focus and scroll", async () => {
+            seedTwoDandisets();
+            await loadQueueData();
+            await hydrationIdle();
+            const scrollTo = vi.spyOn(window, "scrollTo").mockImplementation(() => {});
+            const input = document.querySelector(".run-search-input");
+            input.focus();
+
+            type("dandiset:000888");
+            expect(window.location.search).not.toContain("dandiset="); // not on each keystroke
+            await pause();
+
+            expect(window.location.search).toContain("dandiset=000888");
+            expect(document.querySelectorAll("#runs .run-entry")).toHaveLength(1);
+            expect(input.value).toBe("dandiset:000888");
+            expect(document.activeElement).toBe(input);
+            expect(document.querySelector(".run-search-status").hidden).toBe(true);
+            expect(scrollTo).not.toHaveBeenCalled();
+            scrollTo.mockRestore();
+            await hydrationIdle();
+        });
+
+        it("holds back unfinished terms while typing", async () => {
+            seedTwoDandisets();
+            await loadQueueData();
+            await hydrationIdle();
+            document.querySelector(".run-search-input").focus();
+
+            // A partial value would match nothing, so it waits.
+            type("dandiset:0008");
+            await pause();
+            expect(window.location.search).not.toContain("dandiset=");
+            expect(document.querySelector("#runs .runs-empty")).toBeNull();
+
+            // So does a word that may yet become a key; the finished term applies.
+            type("dandiset:000888 pip");
+            await pause();
+            expect(window.location.search).toContain("dandiset=000888");
+            expect(window.location.search).not.toContain("q=");
+            await hydrationIdle();
+        });
+
+        it("gives one stretch of typing a single history entry", async () => {
+            seedTwoDandisets();
+            await loadQueueData();
+            await hydrationIdle();
+            const pushState = vi.spyOn(window.history, "pushState");
+            const replaceState = vi.spyOn(window.history, "replaceState");
+            const input = document.querySelector(".run-search-input");
+            input.focus();
+
+            type("dandiset:000888");
+            await pause();
+            type("dandiset:000888 000888");
+            await pause();
+            input.closest("form").dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+
+            expect(pushState).toHaveBeenCalledTimes(1);
+            expect(window.location.search).toContain("q=000888");
+            // Typing again after leaving the bar starts a new entry.
+            input.focus();
+            type("");
+            await pause();
+            expect(pushState).toHaveBeenCalledTimes(2);
+            expect(replaceState.mock.calls.length).toBeGreaterThan(0);
+            pushState.mockRestore();
+            replaceState.mockRestore();
+            await hydrationIdle();
+        });
+
         it("keeps a search being typed through hydration refreshes of the banner", async () => {
             seedTwoDandisets();
             await loadQueueData();
@@ -1571,6 +1650,22 @@ describe("common issues page", () => {
             "source:archive",
             "source:main",
         ]);
+    });
+
+    it("waits for Enter rather than applying as you type, since applying reloads the page", async () => {
+        window.history.replaceState(null, "", "/?view=issues&source=archive");
+        installFetch(MAIN(), ARCHIVE());
+        await loadIssuesData();
+        await issuesScanIdle();
+
+        const input = document.querySelector(".run-search-input");
+        input.focus();
+        input.value = "source:main";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        expect(window.location.search).toBe("?view=issues&source=archive");
+        expect(document.querySelector(".run-search-status").textContent).toBe("Press Enter to apply.");
     });
 
     it("reuses cached records instead of refetching logs on a reload", async () => {
