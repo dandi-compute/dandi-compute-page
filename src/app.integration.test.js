@@ -348,6 +348,42 @@ describe("app integration behavior", () => {
         );
     });
 
+    it("lists versions newest first, whatever their job counts", () => {
+        const jobCounts = {
+            "v1.2.4": 158,
+            "1.4.0": 41,
+            "1.3.3": 34,
+            "v1.2.2": 17,
+            "1.5.0": 15,
+            "v1.3.2": 8,
+            "1.2.4": 1,
+        };
+        const runs = Object.entries(jobCounts).flatMap(([pipelineVersion, count]) =>
+            Array.from({ length: count }, () => ({ pipelineName: "aind+ephys", pipelineVersion, codebase: "v0.4.0" }))
+        );
+        renderFilterBanner({}, runs);
+
+        expect(suggest("pipeline:aind-ephys version:")).toEqual([
+            "version:1.5.0",
+            "version:1.4.0",
+            "version:1.3.3",
+            "version:v1.3.2",
+            // Same version: the one more jobs ran comes first.
+            "version:v1.2.4",
+            "version:1.2.4",
+            "version:v1.2.2",
+        ]);
+        expect([...document.querySelectorAll(".run-search-option-count")].map((el) => el.textContent)).toEqual([
+            "15",
+            "41",
+            "34",
+            "8",
+            "158",
+            "1",
+            "17",
+        ]);
+    });
+
     it("completes a key, then a value, from the keyboard", () => {
         renderFilterBanner({}, SCOPED_RUNS);
         const input = document.querySelector(".run-search-input");
@@ -362,9 +398,9 @@ describe("app integration behavior", () => {
         key("Enter");
         expect(input.value).toBe("version:");
         expect([...document.querySelectorAll(".run-search-option")].map((option) => option.dataset.term)).toEqual([
-            "version:v1",
-            "version:v2",
             "version:v3",
+            "version:v2",
+            "version:v1",
         ]);
 
         // Escape closes the list, then drops the draft.

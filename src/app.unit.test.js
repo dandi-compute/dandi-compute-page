@@ -1,5 +1,6 @@
 const {
     applyFilter,
+    compareVersionsDescending,
     filterToSearchText,
     parseFilter,
     parseSearchTerms,
@@ -2473,6 +2474,38 @@ describe("search terms", () => {
     it("reads the pipeline and free-text filters from the URL", () => {
         window.history.replaceState(null, "", "/?pipeline=lfp&q=spikes+%22sub-1%22");
         expect(parseFilter()).toMatchObject({ pipeline: "lfp", text: 'spikes "sub-1"' });
+    });
+});
+
+describe("compareVersionsDescending", () => {
+    it("orders versions newest first by semantic version precedence, then anything else", () => {
+        const versions = [
+            "v1.2.2",
+            "abc1234",
+            "1.10.0",
+            "2.0.0-rc.1",
+            "v1",
+            "1.5.0",
+            "2.0.0",
+            "2.0.0-rc.2",
+            "2.0.0-alpha",
+        ];
+        expect([...versions].sort(compareVersionsDescending)).toEqual([
+            "2.0.0",
+            "2.0.0-rc.2",
+            "2.0.0-rc.1",
+            "2.0.0-alpha",
+            "1.10.0",
+            "1.5.0",
+            "v1.2.2",
+            "v1",
+            "abc1234",
+        ]);
+    });
+
+    it("ties versions that differ only in a v prefix or build metadata", () => {
+        expect(compareVersionsDescending("v1.2.4", "1.2.4")).toBe(0);
+        expect(compareVersionsDescending("v1.0.1+20abeb6", "1.0.1")).toBe(0);
     });
 });
 
