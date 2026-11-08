@@ -4070,10 +4070,10 @@ describe("progressive hydration helpers", () => {
 
 describe("live squeue monitor", () => {
     const RAW = "https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads";
-    // One line of `squeue --me --format=%.10i %15P %40j %.2t %.10M %.6D %.2C %.10m %30R`.
+    // One line of `squeue --me --format=%.30i %15P %40j %.2t %.10M %.6D %.2C %.10m %30R`.
     const squeueLine = (id, partition, name, state, time, nodes, cpus, memory, reason) =>
         [
-            id.padStart(10),
+            id.padStart(30),
             partition.padEnd(15),
             name.padEnd(40),
             state.padStart(2),
@@ -4098,7 +4098,18 @@ describe("live squeue monitor", () => {
         SQUEUE_HEADER,
         squeueLine("28006829", "mit_preemptable", "DANDI-Compute-Submitter", "R", "0:52", "1", "1", "1G", "node1409"),
         squeueLine("28006900", "mit_preemptable", "aind <ephys>", "R", "12:01", "1", "8", "64G", "node1410"),
-        squeueLine("28006901", "mit_preemptable", "aind-ephys", "PD", "0:00", "1", "8", "64G", "(Priority)"),
+        // A pending job array, whose ID names its task range and throttle.
+        squeueLine(
+            "28006901_[5-1000%10]",
+            "mit_preemptable",
+            "aind-ephys",
+            "PD",
+            "0:00",
+            "1",
+            "8",
+            "64G",
+            "(Priority)"
+        ),
         "",
     ].join("\n");
 
@@ -4408,7 +4419,8 @@ describe("live squeue monitor", () => {
         expect(rows.map((cells) => cells.map((td) => td.textContent))).toEqual([
             ["28006829", "mit_preemptable", "DANDI-Compute-Submitter", "R", "0:52", "1", "1", "1G", "node1409"],
             ["28006900", "mit_preemptable", "aind <ephys>", "R", "12:01", "1", "8", "64G", "node1410"],
-            ["28006901", "mit_preemptable", "aind-ephys", "PD", "0:00", "1", "8", "64G", "(Priority)"],
+            // The whole array ID, not clipped to squeue's old 10-character JOBID field.
+            ["28006901_[5-1000%10]", "mit_preemptable", "aind-ephys", "PD", "0:00", "1", "8", "64G", "(Priority)"],
         ]);
         // Job names are text, never markup.
         expect(screen.innerHTML).toContain("aind &lt;ephys&gt;");
