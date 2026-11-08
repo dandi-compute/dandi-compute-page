@@ -4113,15 +4113,21 @@ describe("live squeue monitor", () => {
         "",
     ].join("\n");
 
-    // What launcher/disk.sh records: df of the home and project filesystems, then du of the home directory.
+    // What launcher/disk.sh records: df of the project filesystems, then the home directory's quota report.
+    const DISK_DF_STDOUT = [
+        "Mounted               Size  Used Avail Use%",
+        "/orcd/data/dandi/001  968T  792T  176T  72%",
+        "/orcd/data/dandi/002  682T  634T   48T  93%",
+    ].join("\n");
     const DISK_STDOUT = [
-        "Mounted              Size  Used Avail Use%",
-        "/home/cb239          100G   45G   55G  45%",
-        "/orcd/data/dandi/001 968T  792T  176T  82%",
-        "/orcd/data/dandi/002 682T  634T   48T  93%",
+        DISK_DF_STDOUT,
         "",
-        "Used       Path",
-        "12G        /home/cb239",
+        "                               QUOTA REPORT",
+        " Space   | Usage (GB) | Limit (GB) | % Used | Files | Limit | % Used",
+        "---------+------------+------------+--------+-------+-------+--------",
+        " HOME    |      170.7 |      200.0 |  85.36 |  1.0M |  1.0M | 100.00",
+        " SCRATCH |        0.0 |     1024.0 |   0.00 |     1 |  1.0M |   0.00",
+        " POOL    |        0.0 |     1024.0 |   0.00 |     1 |  1.1M |   0.00",
         "",
     ].join("\n");
 
@@ -4658,14 +4664,15 @@ describe("live squeue monitor", () => {
 
         expect(root.querySelector(".squeue-status").textContent).toBe("live");
         expect(root.querySelector(".squeue-age").textContent).toBe("18 min ago");
-        // One chip per filesystem: its mount point and how full it is.
+        // One chip per filesystem (its mount point and how full it is), then the home quota on space and on files.
         const chips = [...root.querySelectorAll(".squeue-tally .disk-pct")];
-        expect(chips.map((chip) => [chip.textContent, chip.className])).toEqual([
-            ["/home/cb239 45%", "disk-pct disk-pct-ok"],
-            ["/orcd/data/dandi/001 82%", "disk-pct disk-pct-warn"],
-            ["/orcd/data/dandi/002 93%", "disk-pct disk-pct-critical"],
+        expect(chips.map((chip) => [chip.textContent, chip.className, chip.title])).toEqual([
+            ["/orcd/data/dandi/001 72%", "disk-pct disk-pct-ok", "/orcd/data/dandi/001"],
+            ["/orcd/data/dandi/002 93%", "disk-pct disk-pct-critical", "/orcd/data/dandi/002"],
+            ["home 85.36%", "disk-pct disk-pct-warn", "Home directory: 170.7 of 200.0 GB"],
+            ["home files 100.00%", "disk-pct disk-pct-critical", "Home directory: 1.0M of 1.0M files"],
         ]);
-        // The df table, then the du table.
+        // The df table, then the quota report.
         const tables = [...root.querySelectorAll(".squeue-screen table.disk-table")];
         expect(tables).toHaveLength(2);
         expect([...tables[0].querySelectorAll("thead th")].map((th) => th.textContent)).toEqual([
@@ -4677,15 +4684,50 @@ describe("live squeue monitor", () => {
         ]);
         const rows = [...tables[0].querySelectorAll("tbody tr")].map((tr) => [...tr.cells].map((td) => td.textContent));
         expect(rows).toEqual([
-            ["/home/cb239", "100G", "45G", "55G", "45%"],
-            ["/orcd/data/dandi/001", "968T", "792T", "176T", "82%"],
+            ["/orcd/data/dandi/001", "968T", "792T", "176T", "72%"],
             ["/orcd/data/dandi/002", "682T", "634T", "48T", "93%"],
         ]);
         expect(
             [...tables[0].querySelectorAll("tbody tr")].map((tr) => tr.cells[4].querySelector(".disk-pct").className)
-        ).toEqual(["disk-pct disk-pct-ok", "disk-pct disk-pct-warn", "disk-pct disk-pct-critical"]);
-        expect([...tables[1].querySelectorAll("thead th")].map((th) => th.textContent)).toEqual(["Used", "Path"]);
-        expect([...tables[1].querySelectorAll("tbody td")].map((td) => td.textContent)).toEqual(["12G", "/home/cb239"]);
+        ).toEqual(["disk-pct disk-pct-ok", "disk-pct disk-pct-critical"]);
+        const quota = tables[1];
+        expect(quota.classList.contains("disk-quota-table")).toBe(true);
+        expect(quota.querySelector("caption").textContent).toBe("Home directory quota");
+        expect([...quota.querySelectorAll("thead th")].map((th) => th.textContent)).toEqual([
+            "Space",
+            "Usage (GB)",
+            "Limit (GB)",
+            "% Used",
+            "Files",
+            "Limit",
+            "% Used",
+        ]);
+        expect([...quota.querySelectorAll("tbody tr")].map((tr) => [...tr.cells].map((td) => td.textContent))).toEqual([
+            ["HOME", "170.7", "200.0", "85.36%", "1.0M", "1.0M", "100.00%"],
+            ["SCRATCH", "0.0", "1024.0", "0.00%", "1", "1.0M", "0.00%"],
+            ["POOL", "0.0", "1024.0", "0.00%", "1", "1.1M", "0.00%"],
+        ]);
+        const homeCells = quota.querySelector("tbody tr").cells;
+        expect([homeCells[3], homeCells[6]].map((td) => td.querySelector(".disk-pct").className)).toEqual([
+            "disk-pct disk-pct-warn",
+            "disk-pct disk-pct-critical",
+        ]);
+        // The rule under the header is not a row.
+        expect(root.querySelector(".squeue-screen").textContent).not.toContain("---");
+
+        // Without a quota report (~/orcd/.quota missing), the du line stands in for it, without home chips.
+        const fallback = document.createElement("div");
+        fallback.innerHTML = renderDiskMonitor(
+            { snapshot: { ...snapshot, stdout: `${DISK_DF_STDOUT}\n\nUsed       Path\n142G       /home/cb239\n` } },
+            NOW.getTime()
+        );
+        expect([...fallback.querySelectorAll(".squeue-tally .disk-pct")].map((chip) => chip.textContent)).toEqual([
+            "/orcd/data/dandi/001 72%",
+            "/orcd/data/dandi/002 93%",
+        ]);
+        const duTable = fallback.querySelectorAll(".squeue-screen table.disk-table")[1];
+        expect([...duTable.querySelectorAll("thead th")].map((th) => th.textContent)).toEqual(["Used", "Path"]);
+        expect([...duTable.querySelectorAll("tbody td")].map((td) => td.textContent)).toEqual(["142G", "/home/cb239"]);
 
         // Three missed half-hourly snapshots are stale; output that is not a table stays text.
         const later = document.createElement("div");
@@ -4725,7 +4767,7 @@ describe("live squeue monitor", () => {
         expect(monitor.parentElement.id).toBe("status-disk");
         expect(monitor.getAttribute("aria-label")).toBe("Latest disk usage snapshot from MIT Engaging");
         expect(monitor.querySelector(".squeue-status").textContent).toBe("live");
-        expect(monitor.querySelectorAll(".squeue-tally .disk-pct")).toHaveLength(3);
+        expect(monitor.querySelectorAll(".squeue-tally .disk-pct")).toHaveLength(4);
         expect(document.getElementById("squeue-monitor")).toBeNull();
 
         // Polled every 5 minutes, not every minute like the queue.
