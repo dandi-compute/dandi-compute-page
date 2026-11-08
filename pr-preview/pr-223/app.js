@@ -603,12 +603,51 @@ function formatByteCount(value) {
 // loaded queue and restarts hydration, which is too heavy to do per keystroke.
 
 const SEARCH_MAX_VALUE_SUGGESTIONS = 10;
+
+// "1.5.0", "v1.2.4", "v1", "2.0.0-rc.1", "v1.0.1+20abeb6" (missing parts read as 0).
+const VERSION_PATTERN = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9a-z.-]+))?(?:\+[0-9a-z.-]+)?$/i;
+
+function parseVersion(text) {
+    const match = VERSION_PATTERN.exec(String(text ?? "").trim());
+    if (!match) return null;
+    const [, major, minor = "0", patch = "0", prerelease] = match;
+    return { core: [major, minor, patch].map(Number), prerelease: prerelease ? prerelease.split(".") : [] };
+}
+
+// Semantic version precedence of two pre-release tags, ascending.
+function comparePrereleases(a, b) {
+    if (a.length === 0 || b.length === 0) return b.length - a.length;
+    for (let i = 0; i < Math.min(a.length, b.length); i++) {
+        const [x, y] = [a[i], b[i]];
+        if (x === y) continue;
+        const [xNumeric, yNumeric] = [/^\d+$/.test(x), /^\d+$/.test(y)];
+        if (xNumeric && yNumeric) return Number(x) - Number(y);
+        if (xNumeric !== yNumeric) return xNumeric ? -1 : 1;
+        return x < y ? -1 : 1;
+    }
+    return a.length - b.length;
+}
+
+// Newest first by semantic version precedence; values that aren't versions
+// follow, alphabetically. Equal precedence (e.g. "v1.2.4" and "1.2.4") is a tie.
+function compareVersionsDescending(a, b) {
+    const [left, right] = [parseVersion(a), parseVersion(b)];
+    if (!left || !right) {
+        if (left || right) return left ? -1 : 1;
+        return FILTER_VALUE_COLLATOR.compare(String(a), String(b));
+    }
+    for (let i = 0; i < 3; i++) {
+        if (left.core[i] !== right.core[i]) return right.core[i] - left.core[i];
+    }
+    return comparePrereleases(right.prerelease, left.prerelease);
+}
 const SEARCH_SUGGESTIONS_ID = "run-search-suggestions";
 
 // The search's filter keys, in the order the search bar writes them. `field` is
 // the parseFilter() field a key reads and `param` the narrowUrl() param it
 // writes. A key reads its values off each job (`values`) or offers a fixed set
-// of `options` whose job counts come from applyFilter. A `multiple` key ANDs
+// of `options` whose job counts come from applyFilter. Values are listed most
+// common first, or by the key's own `order`. A `multiple` key ANDs
 // its terms together (size:>10 size:<100); any other keeps only its last term.
 // `views` limits a key to those views and `excludeViews` keeps it off those.
 // Options are functions as some read constants declared further down the file.
@@ -636,6 +675,7 @@ const SEARCH_FILTERS = [
         param: "pipelineVersion",
         description: "Pipeline version",
         values: (run) => [run.pipelineVersion],
+        order: compareVersionsDescending,
     },
     {
         key: "params",
@@ -657,6 +697,7 @@ const SEARCH_FILTERS = [
         param: "dandiCodebaseVersion",
         description: "DANDI Compute codebase version",
         values: (run) => [run.codebase],
+        order: compareVersionsDescending,
     },
     {
         key: "size",
@@ -894,7 +935,8 @@ function isSearchPending(text) {
 }
 
 // Each value of a key among `runs`, with how many of them have it, most
-// common first. Option keys list only the options some job matches.
+// common first (or in the key's `order`). Option keys list only the options
+// some job matches.
 function searchValueCounts(def, runs) {
     const counts = new Map();
     if (def.values) {
@@ -912,7 +954,10 @@ function searchValueCounts(def, runs) {
     }
     return [...counts]
         .map(([value, count]) => ({ value, count }))
-        .sort((a, b) => b.count - a.count || FILTER_VALUE_COLLATOR.compare(a.value, b.value));
+        .sort(
+            (a, b) =>
+                def.order?.(a.value, b.value) || b.count - a.count || FILTER_VALUE_COLLATOR.compare(a.value, b.value)
+        );
 }
 
 function searchFilterHasValues(def, runs) {
@@ -8178,6 +8223,7 @@ if (typeof module !== "undefined" && module.exports) {
     module.exports = {
         applyFilter,
         commitSearch,
+        compareVersionsDescending,
         filterToSearchText,
         parseFilter,
         parseSearchTerms,
