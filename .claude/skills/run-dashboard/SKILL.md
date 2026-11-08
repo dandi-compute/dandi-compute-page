@@ -43,9 +43,6 @@ open it in Chromium, and stub the external endpoints at the network boundary.
       `<kind>/LATEST`, then `<kind>/<record>/{stdout,stderr,exit_status}` (records are
       `HH/YYYYMMDDTHHMMSS-squeue` and `HH/YYYYMMDDTHHMMSS-usage`). Unstubbed, they 404 into a
       "no snapshots" terminal without affecting the rest of the page.
-    - `https://raw.githubusercontent.com/dandi/backup-status/main/README.md` — the DANDI Archive
-      backup partitions on `?view=status`, read from the README's `## Disk Space` table
-      (`| 001 | 791.56 TB / 967.57 TB (81.81%) |` rows) and its `Last update:` line.
     - `.../code/main/src/dandi_compute_code/queue/pipeline_configs.json` — priorities banner.
     - `.../code/main/...registered_params.json` / `registered_configs.json` — registries.
     - `https://dandiarchive.s3.amazonaws.com/blobs/<3>/<3>/<id>` — per-run artifacts

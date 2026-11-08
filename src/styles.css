@@ -301,8 +301,9 @@ h1 {
 }
 .squeue-tally {
     display: inline-flex;
+    flex-wrap: wrap;
     align-items: center;
-    gap: 6px;
+    gap: 4px 6px;
 }
 /* A SLURM state code, as a badge in the table and as a count chip in the bar. */
 .squeue-st {
@@ -437,7 +438,7 @@ h1 {
 .squeue-stderr {
     color: var(--squeue-error);
 }
-/* The Use% badge: in the disk snapshot's table and bar, and on the backup meters. */
+/* The Use% badge: on the disk snapshot's meters, in its tables and in its bar. */
 .disk-pct {
     display: inline-block;
     padding: 0 6px;
@@ -465,11 +466,6 @@ h1 {
 .disk-table + .disk-table {
     margin-top: 14px;
 }
-.disk-table caption {
-    padding-top: 10px;
-    color: var(--squeue-dim);
-    text-align: left;
-}
 
 /* ─── Status page ───────────────────────────────────────────── */
 .status-page {
@@ -479,89 +475,79 @@ h1 {
     margin-bottom: 40px;
 }
 .status-heading {
-    margin: 0 0 6px;
+    margin: 0;
     font-size: 1.25em;
     font-weight: 600;
     letter-spacing: 0.01em;
-}
-.status-note {
-    margin: 0;
-    color: var(--color-text-secondary);
-    line-height: 1.5;
-}
-.status-note code {
-    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
-    font-size: 0.9em;
 }
 .status-section .squeue-monitor {
     margin-top: 14px;
 }
 
-/* The backup partitions, as meters in a card. */
-.backup-status {
-    margin-top: 14px;
-    padding: 16px 20px;
-    background: var(--color-surface);
-    border: 1px solid var(--color-border);
-    border-radius: var(--radius);
+/* The disk snapshot's filesystems and quotas, as meters in one grid, so that
+   the bars line up: name (and "space" or "files"), bar, usage, percentage. */
+.disk-meters {
+    display: grid;
+    grid-template-columns: max-content max-content minmax(80px, 1fr) max-content max-content;
+    column-gap: 14px;
 }
-.backup-status-head {
+.disk-meters-caption {
+    grid-column: 1 / -1;
     display: flex;
     flex-wrap: wrap;
-    align-items: baseline;
     justify-content: space-between;
-    gap: 4px 16px;
-    margin-bottom: 12px;
-}
-.backup-status-title {
+    gap: 2px 16px;
+    padding: 10px 0 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--squeue-dim);
     font-weight: 600;
 }
-.backup-status-source {
-    font-size: 0.85em;
-    color: var(--color-text-secondary);
+.disk-meters-caption ~ .disk-meters-caption {
+    margin-top: 10px;
 }
-.backup-status-source a {
-    color: var(--color-accent);
-    text-decoration: none;
-}
-.backup-status-source a:hover {
-    text-decoration: underline;
-}
-.backup-status-updated {
-    margin-right: 10px;
-}
-.backup-status-note {
-    margin: 0;
-    color: var(--color-text-secondary);
-}
-.backup-status-error {
-    color: var(--color-failed);
+.disk-meters-note {
+    font-weight: 400;
 }
 .disk-meter {
+    grid-column: 1 / -1;
     display: grid;
-    grid-template-columns: 4em minmax(80px, 1fr) auto auto;
+    grid-template-columns: subgrid;
     align-items: center;
-    gap: 12px;
-    padding: 6px 0;
+    padding: 5px 0;
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
-.disk-meter + .disk-meter {
-    border-top: 1px solid var(--color-border);
+.disk-meters-caption + .disk-meter {
+    border-top: 0;
+}
+/* A space's files, under its space: one group with it. */
+.disk-meter-continued {
+    padding-top: 0;
+    border-top: 0;
+}
+.disk-meter-label {
+    display: contents;
 }
 .disk-meter-name {
-    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
     font-weight: 600;
+    white-space: nowrap;
+}
+.disk-meter-name-wide {
+    grid-column: span 2;
+}
+.disk-meter-kind {
+    color: var(--squeue-dim);
 }
 .disk-meter-bar {
     display: block;
-    height: 10px;
-    border-radius: 5px;
-    background: rgba(128, 128, 128, 0.18);
+    height: 8px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.08);
     overflow: hidden;
 }
 .disk-meter-fill {
     display: block;
     height: 100%;
-    border-radius: 5px;
+    border-radius: 4px;
     background: var(--color-success);
 }
 .disk-meter-warn .disk-meter-fill {
@@ -571,17 +557,28 @@ h1 {
     background: var(--color-failed);
 }
 .disk-meter-text {
-    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
-    font-size: 0.9em;
-    color: var(--color-text-secondary);
+    color: var(--squeue-dim);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
     white-space: nowrap;
 }
+.disk-meter .disk-pct {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+/* The meters are short enough to show whole. */
+#disk-monitor .squeue-screen {
+    max-height: none;
+}
 @media (max-width: 600px) {
-    .disk-meter {
-        grid-template-columns: 4em 1fr auto;
+    /* The usage moves under its bar. */
+    .disk-meters {
+        grid-template-columns: max-content max-content minmax(60px, 1fr) max-content;
     }
     .disk-meter-text {
-        grid-column: 2 / span 2;
+        grid-row: 2;
+        grid-column: 3 / -1;
+        text-align: left;
     }
 }
 
