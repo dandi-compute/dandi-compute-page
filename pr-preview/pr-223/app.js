@@ -75,8 +75,8 @@ const DANDISET_SUBJECT_DEFAULTS = new Map([["001849", "test"]]);
    "tests" | "archive" | "status" | null), set during init */
 let _viewMode = null;
 
-/* Module-level layout mode ("tree" | "flat"), toggled by the layout bar */
-let _layoutMode = "tree";
+/* Module-level layout mode ("flat" | "tree"), toggled by the layout bar */
+let _layoutMode = "flat";
 /* Module-level sort mode ("attempt" | "created_at" | "dandiset_id"), toggled by the layout bar */
 let _sortMode = "attempt";
 /* Module-level sort direction ("desc" | "asc"), toggled by the layout bar */
@@ -138,7 +138,7 @@ function syncTopNav(viewMode = parseViewMode()) {
 function parseLayoutMode() {
     const layout = new URLSearchParams(window.location.search).get("layout");
     if (layout === "flat" || layout === "tree") return layout;
-    return localStorage.getItem("layoutMode") === "flat" ? "flat" : "tree";
+    return localStorage.getItem("layoutMode") === "tree" ? "tree" : "flat";
 }
 
 function parseSortMode() {
@@ -5751,8 +5751,8 @@ function renderLayoutBar() {
     return `<div class="layout-bar">
     <div class="layout-bar-group">
         <span class="layout-bar-label">View:</span>
-        <button class="layout-btn${!isFlat ? " layout-btn-active" : ""}" data-layout="tree" aria-pressed="${!isFlat}">Tree</button>
         <button class="layout-btn${isFlat ? " layout-btn-active" : ""}" data-layout="flat" aria-pressed="${isFlat}">Flat</button>
+        <button class="layout-btn${!isFlat ? " layout-btn-active" : ""}" data-layout="tree" aria-pressed="${!isFlat}">Tree</button>
     </div>
     <div class="layout-bar-group layout-bar-group-sort">
         <label class="layout-sort-wrap">
