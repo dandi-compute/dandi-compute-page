@@ -1091,39 +1091,20 @@ function renderSearchForm() {
         <input type="search" class="run-search-input" name="q" placeholder="${e(placeholder)}" aria-label="Search ${searchNoun()}" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${SEARCH_SUGGESTIONS_ID}">
         <ul class="run-search-suggestions" id="${SEARCH_SUGGESTIONS_ID}" role="listbox" aria-label="Suggestions" tabindex="-1" hidden></ul>
     </div>
-    <div class="run-search-summary">
-        <p class="run-search-status" role="status"></p>
-        <button type="button" class="run-search-clear" hidden>Clear search</button>
-    </div>
+    <p class="run-search-status" role="status" hidden></p>
 </form>`;
 }
 
-// The line under the search: how many jobs an applied search shows, whether
-// the typed search is yet to be applied, and any terms that could not be used
-// as typed.
+// The line under the search, shown only while there is something to say about
+// the search typed: that it is yet to be applied, or terms it could not use.
 function updateSearchStatus(form) {
     const input = form.querySelector(".run-search-input");
     const status = form.querySelector(".run-search-status");
-    const clear = form.querySelector(".run-search-clear");
-    if (!input || !status || !clear) return;
+    if (!input || !status) return;
     const { problems } = searchTermsToParams(parseSearchTerms(input.value));
-    const parts = [];
-    // The Common Issues page ignores any status filter (every job failed).
-    const filter = _viewMode === "issues" ? { ..._searchFilter, status: null } : _searchFilter;
-    if (_searchRuns.length > 0 && isFilterActive(filter)) {
-        parts.push(`Showing ${applyFilter(_searchRuns, filter).length} of ${_searchRuns.length} ${searchNoun()}.`);
-    }
-    if (isSearchPending(input.value)) parts.push("Press Enter to apply.");
-    parts.push(...problems);
-    status.textContent = parts.join(" ");
-    clear.hidden = !input.value.trim() && !isFilterActive(_searchFilter);
-    // Nothing to say (no search applied or typed): no empty line under the bar.
-    form.querySelector(".run-search-summary").hidden = !status.textContent && clear.hidden;
-}
-
-function refreshSearchStatus() {
-    const form = document.querySelector("#filter-banner .run-search");
-    if (form) updateSearchStatus(form);
+    const pending = isSearchPending(input.value) ? ["Press Enter to apply."] : [];
+    status.textContent = [...pending, ...problems].join(" ");
+    status.hidden = !status.textContent;
 }
 
 // Wire up a freshly rendered search form: the suggestion dropdown (a listbox
@@ -1131,7 +1112,6 @@ function refreshSearchStatus() {
 function initSearchForm(form) {
     const input = form.querySelector(".run-search-input");
     const list = form.querySelector(".run-search-suggestions");
-    const clear = form.querySelector(".run-search-clear");
     let suggestions = [];
     let active = -1;
 
@@ -1309,11 +1289,6 @@ function initSearchForm(form) {
         // shown as written rather than ready for another term.
         input.blur();
         apply();
-    });
-    clear.addEventListener("click", () => {
-        input.value = "";
-        apply();
-        input.focus();
     });
 }
 
@@ -6722,6 +6697,18 @@ function showError(msg) {
     el.innerHTML = `<p class="error-icon">⚠</p><p>${e(msg)}</p>`;
 }
 
+// No job matches the applied search: say so where the job cards would be,
+// without the (all-zero) summary or the layout bar.
+function showNoMatches() {
+    document.getElementById("loading").style.display = "none";
+    document.getElementById("error").style.display = "none";
+    document.getElementById("summary").style.display = "none";
+    document.getElementById("layout-bar").style.display = "none";
+    const runs = document.getElementById("runs");
+    runs.innerHTML = `<p class="runs-empty">No jobs match this search.</p>`;
+    runs.style.display = "";
+}
+
 function showResults() {
     document.getElementById("loading").style.display = "none";
     document.getElementById("summary").style.display = "";
@@ -7242,12 +7229,10 @@ function flushHydrationUpdates() {
 
     if (membershipChanged) {
         if (isFiltered && nextFiltered.length === 0) {
-            // Entering the empty-filter state mid-view: hide the stale list.
-            showError("No pipeline runs match the current filter.");
-            document.getElementById("summary").style.display = "none";
-            document.getElementById("runs").style.display = "none";
+            // Entering the empty-filter state mid-view: replace the stale list.
+            showNoMatches();
         } else {
-            // Recover from an earlier empty-filter error state.
+            // Recover from an earlier empty-filter state.
             rerenderRunsPreservingState();
             initLayoutToggle();
             document.getElementById("error").style.display = "none";
@@ -7350,9 +7335,7 @@ function softResetForFilterChange() {
     if (isFiltered && filteredRuns.length === 0) {
         // Possibly transient: the restarted hydration below may yet bring runs
         // into the filtered set (see the matching branch in loadQueueData).
-        showError("No pipeline runs match the current filter.");
-        document.getElementById("summary").style.display = "none";
-        document.getElementById("runs").style.display = "none";
+        showNoMatches();
     } else {
         renderSummary(isFiltered ? filteredRuns : _runsInScope);
         document.getElementById("runs").innerHTML =
@@ -7518,7 +7501,7 @@ async function loadQueueData() {
 
         if (isFiltered && filteredRuns.length === 0) {
             renderFilterBanner(filter, runsInScope);
-            showError("No pipeline runs match the current filter.");
+            showNoMatches();
             // No early return: hydration below may yet bring runs into the
             // filtered set (e.g. failure-step filters need trace data), at
             // which point flushHydrationUpdates switches back to the results.
@@ -7934,9 +7917,6 @@ function renderIssueGroup(group, rank, scannedTotal, maxCount, filter) {
 // jobs (scanned or not); groups cover the scanned ones.
 function renderIssuesPage(state) {
     const { runs, filter, done } = state;
-    // The scan settles each job's failure step, so the search's job count
-    // (and failure: suggestions) move with it.
-    refreshSearchStatus();
     // Counts are rendered into markup: coerce them to integers first.
     const scanned = Math.max(0, Math.trunc(Number(state.scanned)) || 0);
     const total = Math.max(0, Math.trunc(Number(state.total)) || 0);

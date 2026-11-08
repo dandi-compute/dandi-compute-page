@@ -2513,40 +2513,22 @@ a.prov-hash-link:hover {
     border-top: 1px solid var(--color-border);
 }
 
-.run-search-summary {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 4px 14px;
-    padding: 0 8px;
-}
-
 .run-search-status {
     margin: 0;
+    padding: 0 8px;
     font-size: 0.92em;
     color: var(--color-text-secondary);
 }
 
-.run-search-clear {
-    padding: 0;
-    font: inherit;
-    font-size: 0.92em;
-    font-weight: 600;
-    color: var(--color-accent);
-    background: none;
-    border: none;
-    border-bottom: 1px solid rgba(var(--color-accent-rgb), 0.45);
-    cursor: pointer;
-}
-
-.run-search-clear:hover {
-    color: var(--color-accent-hover);
-    border-bottom-color: var(--color-accent-hover);
-}
-
-.run-search-clear:focus-visible {
-    outline: 2px solid var(--color-accent);
-    outline-offset: 2px;
+/* Where the job cards would be, when no job matches the search. */
+.runs-empty {
+    margin: 0;
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--color-text-secondary);
+    background: var(--color-surface);
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius);
 }
 
 /* ─── Job card tags ─────────────────────────────────────────── */
