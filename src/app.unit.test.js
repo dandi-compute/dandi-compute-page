@@ -1,5 +1,11 @@
 const {
     applyFilter,
+    filterToSearchText,
+    parseFilter,
+    parseSearchTerms,
+    pipelineDisplayName,
+    renderRunTags,
+    searchTermsToParams,
     buildInitialRun,
     buildRunPath,
     buildPipelineDiffPairs,
@@ -2410,6 +2416,160 @@ describe("fetchSlurmLogs", () => {
         });
         expect(result).toEqual(["job-12345_slurm.log"]);
         expect(fetchSpy).not.toHaveBeenCalled();
+    });
+});
+
+describe("search terms", () => {
+    afterEach(() => window.history.replaceState(null, "", "/"));
+
+    it("splits a search into terms at whitespace outside quotes", () => {
+        const terms = parseSearchTerms('Pipeline:lfp  subject:"mouse 1" "a:b" spikes');
+        expect(terms.map(({ key, value, raw }) => ({ key, value, raw }))).toEqual([
+            { key: "pipeline", value: "lfp", raw: "Pipeline:lfp" },
+            { key: "subject", value: "mouse 1", raw: 'subject:"mouse 1"' },
+            // A term opening with a quote is literal text, colon and all.
+            { key: null, value: "a:b", raw: '"a:b"' },
+            { key: null, value: "spikes", raw: "spikes" },
+        ]);
+        expect(terms[1]).toMatchObject({ start: 14, end: 31 });
+    });
+
+    it("maps terms onto the filter URL params, and reports terms it can't use", () => {
+        const { params, problems } = searchTermsToParams(
+            parseSearchTerms(
+                "sub:A version:v1 version:v2 size:>10 size:<100 size:big failurestep:pre-processing ses: verson:v3"
+            )
+        );
+        expect(params).toEqual({
+            subject: "A",
+            pipelineVersion: "v2",
+            assetSize: ">10, <100",
+            failureStep: "pre-processing",
+            text: "verson:v3",
+        });
+        expect(problems).toEqual([
+            "Only the last version: term is used.",
+            "Write sizes in GB, like size:>10 or size:<=100.",
+            "There is no verson: filter, so it was searched as text. Did you mean version:?",
+        ]);
+    });
+
+    it("reads a filter set back as search text", () => {
+        expect(
+            filterToSearchText({
+                dandisetId: "000363",
+                pipeline: "aind+ephys",
+                assetSize: "> 50, < 100",
+                status: "failed",
+                text: '"sorting run" x',
+            })
+        ).toBe('dandiset:000363 pipeline:aind+ephys size:>50 size:<100 status:failed "sorting run" x');
+        expect(filterToSearchText({ subject: "mouse 1" })).toBe('subject:"mouse 1"');
+        expect(filterToSearchText({})).toBe("");
+    });
+
+    it("reads the pipeline and free-text filters from the URL", () => {
+        window.history.replaceState(null, "", "/?pipeline=lfp&q=spikes+%22sub-1%22");
+        expect(parseFilter()).toMatchObject({ pipeline: "lfp", text: 'spikes "sub-1"' });
+    });
+});
+
+describe("pipeline and free-text filters", () => {
+    const runs = [
+        {
+            jobId: "job-aaa",
+            dandisetId: "000363",
+            subject: "mouse1",
+            pipelineName: "aind+ephys",
+            pipelineVersion: "v1.2.4",
+            status: "success",
+        },
+        {
+            jobId: "job-bbb",
+            dandisetId: "000409",
+            subject: "mouse2",
+            pipelineName: "lfp",
+            pipelineVersion: "v0.1.0",
+            status: "failed",
+        },
+    ];
+
+    it("filters by pipeline, whichever way its name is spelled", () => {
+        expect(applyFilter(runs, { pipeline: "lfp" })).toEqual([runs[1]]);
+        expect(applyFilter(runs, { pipeline: "aind-ephys" })).toEqual([runs[0]]);
+        expect(applyFilter(runs, { pipeline: "aind+ephys" })).toEqual([runs[0]]);
+        expect(applyFilter(runs, { pipeline: "other" })).toEqual([]);
+    });
+
+    it("matches every free-text word against a job's identifying fields", () => {
+        expect(applyFilter(runs, { text: "MOUSE" })).toEqual(runs);
+        expect(applyFilter(runs, { text: "mouse 000409" })).toEqual([runs[1]]);
+        expect(applyFilter(runs, { text: "job-aaa aind-ephys" })).toEqual([runs[0]]);
+        expect(applyFilter(runs, { text: '"v0.1"' })).toEqual([runs[1]]);
+        expect(applyFilter(runs, { text: "mouse3" })).toEqual([]);
+    });
+
+    it("displays pipeline names with hyphens", () => {
+        expect(pipelineDisplayName("aind+ephys")).toBe("aind-ephys");
+        expect(pipelineDisplayName(null)).toBe("");
+    });
+});
+
+describe("job card tags", () => {
+    const run = {
+        status: "success",
+        attempt: 1,
+        tasks: [],
+        generatedBy: [],
+        logFiles: [],
+        outputPaths: {},
+        path: "derivatives/dandiset-001697/sub-A/pipeline-aind+ephys/job-1",
+        dandisetId: "001697",
+        subject: "A",
+        session: null,
+        pipelineName: "aind+ephys",
+        pipelineVersion: "v1",
+        paramsProfile: "fast",
+        configHash: "abc",
+        jobId: "job-1",
+    };
+
+    afterEach(() => window.history.replaceState(null, "", "/"));
+
+    it("tags each job card with its pipeline, in both layouts", () => {
+        for (const html of [renderFlatList([run]), renderDandisets([run])]) {
+            const container = document.createElement("div");
+            container.innerHTML = html;
+            const tag = container.querySelector(".run-entry .run-tag");
+            expect(tag).not.toBeNull();
+            expect(tag.className).toContain("run-tag-pipeline-aind-ephys");
+            expect(tag.querySelector(".run-tag-key").textContent).toBe("pipeline");
+            expect(tag.querySelector(".run-tag-value").textContent).toBe("aind-ephys");
+        }
+    });
+
+    it("links a tag to the current search with its pipeline term toggled", () => {
+        window.history.replaceState(null, "", "/?view=dashboard&layout=flat&sort=attempt&sortDir=desc&status=failed");
+        const inactive = document.createElement("div");
+        inactive.innerHTML = renderRunTags(run);
+        const href = inactive.querySelector(".run-tag").getAttribute("href");
+        expect(new URLSearchParams(href.slice(1)).get("pipeline")).toBe("aind-ephys");
+        expect(new URLSearchParams(href.slice(1)).get("status")).toBe("failed");
+        expect(inactive.querySelector(".run-tag").classList.contains("run-tag-active")).toBe(false);
+
+        window.history.replaceState(null, "", `/${href}`);
+        const active = document.createElement("div");
+        active.innerHTML = renderRunTags(run);
+        const tag = active.querySelector(".run-tag");
+        expect(tag.classList.contains("run-tag-active")).toBe(true);
+        expect(tag.getAttribute("title")).toBe("Stop filtering by pipeline:aind-ephys");
+        const offHref = new URLSearchParams(tag.getAttribute("href").slice(1));
+        expect(offHref.get("pipeline")).toBeNull();
+        expect(offHref.get("status")).toBe("failed");
+    });
+
+    it("leaves jobs without a pipeline untagged", () => {
+        expect(renderRunTags({ ...run, pipelineName: null })).toBe("");
     });
 });
 

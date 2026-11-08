@@ -6,9 +6,12 @@ const {
     initFlatShowMore,
     initHydrationPromotion,
     initInPageFilterNavigation,
+    filterToSearchText,
     loadQueueData,
+    parseFilter,
     parseQueueEntries,
     renderFilterBanner,
+    searchTextToUrl,
     renderSummary,
     showDiffResults,
     showError,
@@ -29,11 +32,22 @@ beforeEach(() => {
 });
 
 describe("app integration behavior", () => {
-    it("renders filter banner with active filter crumb and available options", () => {
+    // Type `text` into the search bar (caret at its end) and return the terms
+    // the suggestion dropdown offers.
+    function suggest(text) {
+        const input = document.querySelector(".run-search-input");
+        input.value = text;
+        input.setSelectionRange(text.length, text.length);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        return [...document.querySelectorAll(".run-search-option")].map((option) => option.dataset.term);
+    }
+
+    it("renders the search bar with the applied filters as terms and suggests their values", () => {
         const failedRun = {
             dandisetId: "001697",
             subject: "a",
             session: "s1",
+            pipelineName: "aind+ephys",
             pipelineVersion: "v1",
             paramsProfile: "params-a",
             configHash: "config-a",
@@ -45,6 +59,7 @@ describe("app integration behavior", () => {
             dandisetId: "001697",
             subject: "b",
             session: "s2",
+            pipelineName: "lfp",
             pipelineVersion: "v2",
             paramsProfile: "params-b",
             configHash: "config-b",
@@ -54,7 +69,6 @@ describe("app integration behavior", () => {
         };
         renderFilterBanner(
             {
-                // renderFilterBanner filters use paramsType/configType query keys.
                 dandisetId: "001697",
                 subject: null,
                 session: null,
@@ -68,14 +82,25 @@ describe("app integration behavior", () => {
 
         const banner = document.getElementById("filter-banner");
         expect(banner.style.display).toBe("");
-        expect(banner.innerHTML).toContain("Filtered view:");
-        expect(banner.innerHTML).toContain("Failed in pre-processing");
-        expect(banner.innerHTML).toContain(`Params:&nbsp;${failedRun.paramsProfile}`);
-        expect(banner.innerHTML).toContain(`Config:&nbsp;${failedRun.configHash}`);
-        expect(banner.innerHTML).toContain(`option value="${failedRun.paramsProfile}"`);
-        expect(banner.innerHTML).toContain(`option value="${successfulRun.paramsProfile}"`);
-        expect(banner.innerHTML).toContain(`option value="${failedRun.configHash}"`);
-        expect(banner.innerHTML).toContain(`option value="${successfulRun.configHash}"`);
+        // One search bar instead of a form of per-filter inputs.
+        expect(banner.querySelectorAll("input")).toHaveLength(1);
+        const input = banner.querySelector(".run-search-input");
+        expect(input.value).toBe("dandiset:001697 params:params-a config:config-a failure:pre-processing");
+        expect(banner.querySelector(".run-search-status").textContent).toBe("Showing 1 of 2 jobs.");
+        expect(banner.querySelector(".run-search-clear").hidden).toBe(false);
+
+        // A key's suggestions are the values jobs in view have, with counts.
+        expect(suggest("params:")).toEqual(["params:params-a", "params:params-b"]);
+        expect(suggest("pipeline:")).toEqual(["pipeline:aind-ephys", "pipeline:lfp"]);
+        expect(document.querySelector(".run-search-option .run-search-swatch").className).toContain(
+            "run-tag-pipeline-aind-ephys"
+        );
+        expect([...document.querySelectorAll(".run-search-option-count")].map((el) => el.textContent)).toEqual([
+            "1",
+            "1",
+        ]);
+        // Typing a draft flags it as not yet applied.
+        expect(banner.querySelector(".run-search-status").textContent).toContain("Press Enter to apply.");
     });
 
     it("updates page state displays and escapes error content", () => {
@@ -208,178 +233,144 @@ describe("app integration behavior", () => {
         expect(document.getElementById("runs").style.display).toBe("");
     });
 
-    it("includes layout, sort mode, and sort direction in filter form and clear links for shareable URLs", () => {
+    it("applies searches as URLs that keep the layout, sort mode, and sort direction", () => {
         window.history.replaceState(null, "", "/?layout=flat&sort=created_at&sortDir=asc");
-        renderFilterBanner(
-            {
-                dandisetId: null,
-                subject: null,
-                session: null,
-                pipelineVersion: null,
-                paramsType: null,
-                configType: null,
-                dandiCodebaseHash: null,
-                failureStep: null,
-            },
-            []
-        );
+        const url = searchTextToUrl('dandiset:000363 pipeline:lfp size:>10 size:<100 spikes "sub-1"');
+        const params = new URLSearchParams(url.slice(1));
+        expect(params.get("layout")).toBe("flat");
+        expect(params.get("sort")).toBe("created_at");
+        expect(params.get("sortDir")).toBe("asc");
+        expect(params.get("dandiset")).toBe("000363");
+        expect(params.get("pipeline")).toBe("lfp");
+        expect(params.get("assetSize")).toBe(">10, <100");
+        expect(params.get("q")).toBe('spikes "sub-1"');
+        expect(searchTextToUrl("")).toBe("?layout=flat&sort=created_at&sortDir=asc");
 
-        const banner = document.getElementById("filter-banner");
-        expect(banner.innerHTML).toContain('name="layout" value="flat"');
-        expect(banner.innerHTML).toContain('name="sort" value="created_at"');
-        expect(banner.innerHTML).toContain('name="sortDir" value="asc"');
-        expect(banner.innerHTML).toContain('href="?layout=flat&amp;sort=created_at&amp;sortDir=asc"');
+        // And the URL's filters read back as the same search.
+        window.history.replaceState(null, "", `/${url}`);
+        expect(filterToSearchText(parseFilter())).toBe(
+            'dandiset:000363 pipeline:lfp size:>10 size:<100 spikes "sub-1"'
+        );
     });
 
-    it("preserves status filter in the filter form when active", () => {
+    it("shows the applied status filter as a term", () => {
         window.history.replaceState(null, "", "/?layout=flat&sort=created_at&sortDir=asc&status=failed");
-        renderFilterBanner(
-            {
-                dandisetId: null,
-                subject: null,
-                session: null,
-                pipelineVersion: null,
-                paramsType: null,
-                configType: null,
-                failureStep: null,
-                status: "failed",
-            },
-            [
-                { status: "failed", dandisetId: "001697", subject: "sub-1", session: "ses-1", pipelineVersion: "v1" },
-                { status: "success", dandisetId: "001697", subject: "sub-2", session: "ses-2", pipelineVersion: "v1" },
-            ]
-        );
+        const runs = [
+            { status: "failed", dandisetId: "001697", subject: "sub-1", session: "ses-1", pipelineVersion: "v1" },
+            { status: "success", dandisetId: "001697", subject: "sub-2", session: "ses-2", pipelineVersion: "v1" },
+        ];
+        renderFilterBanner(parseFilter(), runs);
 
         const banner = document.getElementById("filter-banner");
-        expect(banner.innerHTML).toContain('name="status" value="failed"');
-        expect(banner.innerHTML).toContain("Filtered view:");
-        expect(banner.innerHTML).toContain("Failed");
+        expect(banner.querySelector(".run-search-input").value).toBe("status:failed");
+        expect(banner.querySelector(".run-search-status").textContent).toBe("Showing 1 of 2 jobs.");
+        // Status suggestions only offer statuses some job has.
+        expect(suggest("status:")).toEqual(["status:failed", "status:success"]);
     });
 
-    it("scopes subject and session options based on selected dandiset and subject", () => {
-        renderFilterBanner(
-            {
-                dandisetId: "000363",
-                subject: "sub-a",
-                session: null,
-                pipelineVersion: null,
-                paramsType: null,
-                configType: null,
-                dandiCodebaseHash: null,
-                failureStep: null,
-            },
-            [
-                {
-                    dandisetId: "000363",
-                    subject: "sub-a",
-                    session: "ses-1",
-                    pipelineVersion: "v1",
-                    paramsProfile: "4af6a25",
-                    configHash: "0d4bf36",
-                    status: "success",
-                },
-                {
-                    dandisetId: "000363",
-                    subject: "sub-a",
-                    session: "ses-2",
-                    pipelineVersion: "v1",
-                    paramsProfile: "4af6a25",
-                    configHash: "0d4bf36",
-                    status: "success",
-                },
-                {
-                    dandisetId: "000363",
-                    subject: "sub-b",
-                    session: "ses-3",
-                    pipelineVersion: "v1",
-                    paramsProfile: "98fd947",
-                    configHash: "6568dda",
-                    status: "success",
-                },
-                {
-                    dandisetId: "999999",
-                    subject: "other-sub",
-                    session: "other-ses",
-                    pipelineVersion: "v1",
-                    paramsProfile: "98fd947",
-                    configHash: "beef123",
-                    status: "success",
-                },
-            ]
-        );
+    const SCOPED_RUNS = [
+        {
+            dandisetId: "000363",
+            subject: "sub-a",
+            session: "ses-1",
+            pipelineVersion: "v1",
+            paramsProfile: "4af6a25",
+            configHash: "0d4bf36",
+            status: "success",
+        },
+        {
+            dandisetId: "000363",
+            subject: "sub-a",
+            session: "ses-2",
+            pipelineVersion: "v1",
+            paramsProfile: "4af6a25",
+            configHash: "0d4bf36",
+            status: "success",
+        },
+        {
+            dandisetId: "000363",
+            subject: "sub-b",
+            session: "ses-3",
+            pipelineVersion: "v2",
+            paramsProfile: "98fd947",
+            configHash: "6568dda",
+            status: "success",
+        },
+        {
+            dandisetId: "999999",
+            subject: "other-sub",
+            session: "other-ses",
+            pipelineVersion: "v3",
+            paramsProfile: "98fd947",
+            configHash: "beef123",
+            status: "success",
+        },
+    ];
 
-        const subjectOptions = [...document.querySelectorAll("#filter-options-subject option")].map(
-            (option) => option.value
-        );
-        const sessionOptions = [...document.querySelectorAll("#filter-options-session option")].map(
-            (option) => option.value
-        );
+    it("scopes each key's suggestions to the jobs the search's other terms leave", () => {
+        renderFilterBanner({ dandisetId: "000363", subject: "sub-a" }, SCOPED_RUNS);
 
-        expect(subjectOptions).toEqual(["sub-a", "sub-b"]);
-        expect(sessionOptions).toEqual(["ses-1", "ses-2"]);
+        expect(suggest("subject:")).toEqual(["subject:sub-a", "subject:other-sub", "subject:sub-b"]);
+        expect(suggest("dandiset:000363 subject:")).toEqual(["subject:sub-a", "subject:sub-b"]);
+        expect(suggest("dandiset:000363 subject:sub-a session:")).toEqual(["session:ses-1", "session:ses-2"]);
+        // Only versions some job in scope ran; a key's own term doesn't narrow it.
+        expect(suggest("version:v1 dandiset:999999 version:")).toEqual(["version:v3"]);
+        // Typed text narrows a key's values.
+        expect(suggest("dandiset:000363 session:3")).toEqual(["session:ses-3"]);
     });
 
-    it("updates subject and session options immediately when filter inputs change", () => {
-        renderFilterBanner(
-            {
-                dandisetId: null,
-                subject: null,
-                session: null,
-                pipelineVersion: null,
-                paramsType: null,
-                configType: null,
-                dandiCodebaseHash: null,
-                failureStep: null,
-            },
-            [
-                {
-                    dandisetId: "000363",
-                    subject: "sub-a",
-                    session: "ses-1",
-                    pipelineVersion: "v1",
-                    paramsProfile: "4af6a25",
-                    configHash: "0d4bf36",
-                    status: "success",
-                },
-                {
-                    dandisetId: "000363",
-                    subject: "sub-b",
-                    session: "ses-2",
-                    pipelineVersion: "v1",
-                    paramsProfile: "98fd947",
-                    configHash: "6568dda",
-                    status: "success",
-                },
-                {
-                    dandisetId: "000364",
-                    subject: "sub-x",
-                    session: "ses-9",
-                    pipelineVersion: "v1",
-                    paramsProfile: "aa073df",
-                    configHash: "beef123",
-                    status: "success",
-                },
-            ]
+    it("suggests filter keys, values matching free text, and near misses for unknown keys", () => {
+        renderFilterBanner({}, SCOPED_RUNS);
+
+        const keys = suggest("");
+        // Only keys some job has a value for (no pipeline, codebase, size, or
+        // failure step here: no job has those, and none failed).
+        expect(keys).toEqual(["dandiset:", "subject:", "session:", "version:", "params:", "config:", "status:"]);
+        expect(document.querySelector(".run-search-tip").textContent).toContain("Every term has to match");
+
+        expect(suggest("ses")).toEqual([
+            "session:other-ses",
+            "session:ses-1",
+            "session:ses-2",
+            "session:ses-3",
+            "session:",
+        ]);
+        expect([...document.querySelectorAll(".run-search-group-label")].map((el) => el.textContent)).toEqual([
+            "Matching values",
+            "Filters",
+        ]);
+
+        expect(suggest("versoin:")).toEqual(["version:"]);
+        expect(document.querySelector(".run-search-group-label").textContent).toBe("Did you mean");
+        expect(document.querySelector(".run-search-status").textContent).toContain(
+            "There is no versoin: filter, so it was searched as text. Did you mean version:?"
         );
+    });
 
-        const dandisetInput = document.querySelector('input[name="dandiset"]');
-        const subjectInput = document.querySelector('input[name="subject"]');
+    it("completes a key, then a value, from the keyboard", () => {
+        renderFilterBanner({}, SCOPED_RUNS);
+        const input = document.querySelector(".run-search-input");
+        const key = (name) => input.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true }));
 
-        dandisetInput.value = "000363";
-        dandisetInput.dispatchEvent(new Event("input", { bubbles: true }));
+        suggest("ver");
+        // "Matching values" come first; the version: key is the last option.
+        const options = [...document.querySelectorAll(".run-search-option")];
+        key("ArrowUp");
+        expect(options.at(-1).getAttribute("aria-selected")).toBe("true");
+        expect(input.getAttribute("aria-activedescendant")).toBe(options.at(-1).id);
+        key("Enter");
+        expect(input.value).toBe("version:");
+        expect([...document.querySelectorAll(".run-search-option")].map((option) => option.dataset.term)).toEqual([
+            "version:v1",
+            "version:v2",
+            "version:v3",
+        ]);
 
-        let subjectOptions = [...document.querySelectorAll("#filter-options-subject option")].map(
-            (option) => option.value
-        );
-        expect(subjectOptions).toEqual(["sub-a", "sub-b"]);
-
-        subjectInput.value = "sub-a";
-        subjectInput.dispatchEvent(new Event("input", { bubbles: true }));
-
-        const sessionOptions = [...document.querySelectorAll("#filter-options-session option")].map(
-            (option) => option.value
-        );
-        expect(sessionOptions).toEqual(["ses-1"]);
+        // Escape closes the list, then drops the draft.
+        key("Escape");
+        expect(document.querySelector(".run-search-suggestions").hidden).toBe(true);
+        key("Escape");
+        expect(input.value).toBe("");
     });
 });
 
@@ -1062,7 +1053,7 @@ describe("progressive queue loading", () => {
             // the page re-rendered synchronously for the narrowed scope.
             expect(window.location.search).toContain("status=failed");
             expect(blobMemoryCacheStats()).toEqual({ entries: 0, bytes: 0 });
-            expect(document.getElementById("filter-banner").innerHTML).toContain("Filtered view:");
+            expect(document.querySelector(".run-search-input").value).toBe("status:failed");
             expect(document.querySelector("#summary .stat-value").textContent).toBe("1"); // Total Runs
             await hydrationIdle();
 
@@ -1171,18 +1162,105 @@ describe("progressive queue loading", () => {
             expect(runB.failureStep).toBe("pre-processing");
         });
 
-        it("applies the filter form in place via the Apply submit path", async () => {
+        it("applies a search in place on Enter", async () => {
+            seedTwoDandisets();
+            await loadQueueData();
+            await hydrationIdle();
+            const pushState = vi.spyOn(window.history, "pushState");
+
+            const form = document.querySelector(".run-search");
+            const input = form.querySelector(".run-search-input");
+            input.value = "dandiset:000888";
+            const submit = new Event("submit", { bubbles: true, cancelable: true });
+            form.dispatchEvent(submit);
+
+            expect(submit.defaultPrevented).toBe(true);
+            expect(window.location.search).toContain("dandiset=000888");
+            expect(document.querySelector("#summary .stat-value").textContent).toBe("1");
+            expect(document.querySelector("#summary .stat-failed .stat-value").textContent.trim()).toBe("1");
+            expect(form.querySelector(".run-search-status").textContent).toBe("Showing 1 of 2 jobs.");
+            await hydrationIdle();
+
+            // Re-applying the same search (terms reordered, spacing aside) is a no-op.
+            input.value = "  dandiset:000888 ";
+            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            expect(pushState).toHaveBeenCalledTimes(1);
+            pushState.mockRestore();
+        });
+
+        it("applies a picked suggestion in place and keeps the search focused for the next term", async () => {
             seedTwoDandisets();
             await loadQueueData();
             await hydrationIdle();
 
-            const form = document.querySelector(".filter-form");
-            form.querySelector('input[name="dandiset"]').value = "000888";
-            form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+            const input = document.querySelector(".run-search-input");
+            input.focus();
+            input.value = "dandiset:";
+            input.setSelectionRange(9, 9);
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            const option = [...document.querySelectorAll(".run-search-option")].find(
+                (el) => el.dataset.term === "dandiset:000777"
+            );
+            option.dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-            expect(window.location.search).toContain("dandiset=000888");
+            expect(window.location.search).toContain("dandiset=000777");
             expect(document.querySelector("#summary .stat-value").textContent).toBe("1");
-            expect(document.querySelector("#summary .stat-failed .stat-value").textContent.trim()).toBe("1");
+            expect(document.activeElement).toBe(input);
+            expect(input.value).toBe("dandiset:000777 ");
+            expect(document.querySelector(".run-search-suggestions").hidden).toBe(true);
+            await hydrationIdle();
+
+            // Clearing the search applies too.
+            document.querySelector(".run-search-clear").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            expect(window.location.search).not.toContain("dandiset=");
+            expect(document.querySelector("#summary .stat-value").textContent).toBe("2");
+            expect(input.value).toBe("");
+            await hydrationIdle();
+        });
+
+        it("keeps a search being typed through hydration refreshes of the banner", async () => {
+            seedTwoDandisets();
+            await loadQueueData();
+            const input = document.querySelector(".run-search-input");
+            input.focus();
+            input.value = "status:fai";
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            await hydrationIdle();
+
+            expect(document.querySelector(".run-search-input")).toBe(input);
+            expect(document.activeElement).toBe(input);
+            expect(input.value).toBe("status:fai");
+        });
+
+        it("filters to a pipeline in place from a job card's tag, and back", async () => {
+            window.history.replaceState(null, "", "/?layout=flat");
+            seedQueueState([
+                makeEntry({ dandiset_id: "000777", has_logs: false }),
+                makeEntry({ dandiset_id: "000888", pipeline: "lfp", has_logs: false }),
+            ]);
+            installFetch(new Map());
+            initInPageFilterNavigation();
+            await loadQueueData();
+            await hydrationIdle();
+
+            const tags = [...document.querySelectorAll("#runs .run-tag")];
+            expect(tags.map((tag) => tag.textContent)).toEqual(
+                expect.arrayContaining(["pipelineaind-ephys", "pipelinelfp"])
+            );
+            const lfpTag = tags.find((tag) => tag.textContent === "pipelinelfp");
+            expect(lfpTag.className).toContain("run-tag-pipeline-lfp");
+            lfpTag.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+            expect(window.location.search).toContain("pipeline=lfp");
+            expect(document.querySelectorAll("#runs .run-entry")).toHaveLength(1);
+            expect(document.querySelector(".run-search-input").value).toBe("pipeline:lfp");
+            const activeTag = document.querySelector("#runs .run-tag");
+            expect(activeTag.classList.contains("run-tag-active")).toBe(true);
+
+            // The active tag toggles the filter back off.
+            activeTag.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+            expect(window.location.search).not.toContain("pipeline=");
+            expect(document.querySelectorAll("#runs .run-entry")).toHaveLength(2);
             await hydrationIdle();
         });
 
@@ -1401,13 +1479,17 @@ describe("common issues page", () => {
         expect(rows[0].querySelector(".log-link")).not.toBeNull();
         expect(document.getElementById("layout-bar").style.display).toBe("none");
 
-        // Filter banner: issues flavor, with Source instead of Status.
-        const banner = document.getElementById("filter-banner").innerHTML;
-        expect(banner).toContain("Common Issues");
-        expect(banner).toContain('name="source"');
-        expect(banner).not.toContain('name="status"');
-        expect(banner).toContain('name="view" value="issues"');
-        expect(banner).toContain("View all issues");
+        // Search bar: issues flavor, with source: instead of status:.
+        const banner = document.getElementById("filter-banner");
+        expect(banner.innerHTML).toContain("Common Issues");
+        expect(banner.querySelector(".run-search-status").textContent).toBe("5 failed jobs.");
+        const input = banner.querySelector(".run-search-input");
+        input.value = "";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        const keys = [...banner.querySelectorAll(".run-search-option")].map((option) => option.dataset.term);
+        expect(keys).toContain("source:");
+        expect(keys).not.toContain("status:");
+        expect(searchTextToUrl("source:archive")).toContain("view=issues");
     });
 
     it("honors the source and failure-step filters", async () => {
@@ -1428,9 +1510,18 @@ describe("common issues page", () => {
             "RuntimeError: File <path> is not an existing file or folder!"
         );
         expect(document.getElementById("summary").querySelector(".stat-failed .stat-value").textContent).toBe("1");
-        const banner = document.getElementById("filter-banner").innerHTML;
-        expect(banner).toContain("Archive</a>");
-        expect(banner).toContain("Failed in job-dispatch");
+        const banner = document.getElementById("filter-banner");
+        expect(banner.querySelector(".run-search-input").value).toBe("failure:job-dispatch source:archive");
+        // The count follows the log scan, which settles each job's failure step.
+        expect(banner.querySelector(".run-search-status").textContent).toBe("Showing 1 of 3 failed jobs.");
+        // Both sources stay on offer, though only the archive was loaded.
+        const input = banner.querySelector(".run-search-input");
+        input.value = "source:";
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        expect([...banner.querySelectorAll(".run-search-option")].map((option) => option.dataset.term)).toEqual([
+            "source:archive",
+            "source:main",
+        ]);
     });
 
     it("reuses cached records instead of refetching logs on a reload", async () => {

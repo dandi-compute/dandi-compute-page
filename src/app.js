@@ -193,12 +193,16 @@ function dandiBaseUrl(_dandisetId) {
 }
 
 /* ─── URL-based filtering ───────────────────────────────────── */
-function parseFilter() {
-    const params = new URLSearchParams(window.location.search);
+// The filter set lives in the URL, one param per filter (the search bar's
+// key:value terms map onto these, see SEARCH_FILTERS), with the search's free
+// text in `q`. Reads the current URL unless given another query string.
+function parseFilter(search = window.location.search) {
+    const params = new URLSearchParams(search);
     return {
         dandisetId: params.get("dandiset") ?? null,
         subject: params.get("subject") ?? null,
         session: params.get("session") ?? null,
+        pipeline: params.get("pipeline") ?? null,
         pipelineVersion: params.get("version") ?? null,
         paramsType: params.get("params") ?? null,
         configType: params.get("config") ?? null,
@@ -210,7 +214,48 @@ function parseFilter() {
         // Common Issues page only: which queue state the failed jobs come from
         // ("main" | "archive"; null = both).
         source: params.get("source") ?? null,
+        // The search's free text: words (or "quoted phrases") every one of
+        // which must appear in a job's identifying fields (see runSearchText).
+        text: params.get("q") ?? null,
     };
+}
+
+// Pipelines are named with "+" standing in for "-" (path entities can't hold
+// a hyphen), e.g. "aind+ephys"; they are shown, and filtered by, as "aind-ephys".
+function pipelineDisplayName(pipelineName) {
+    return String(pipelineName ?? "").replace(/\+/g, "-");
+}
+
+// What the search's free text is matched against: the identifying fields of a
+// job, lowercased. Status is left out (status: filters it) as it changes while
+// the page hydrates.
+function runSearchText(run) {
+    return [
+        run.jobId,
+        run.dandisetId,
+        run.dandiPath,
+        run.subject,
+        run.session,
+        run.pipelineName ? pipelineDisplayName(run.pipelineName) : null,
+        run.pipelineVersion,
+        runParamsType(run),
+        run.paramsProfile,
+        runConfigType(run),
+        run.configHash,
+        run.codebase,
+    ]
+        .filter((value) => value !== null && value !== undefined && value !== "")
+        .join(" ")
+        .toLowerCase();
+}
+
+function matchesSearchText(run, text) {
+    const words = parseSearchTerms(text)
+        .map((term) => term.raw.replace(/"/g, "").trim().toLowerCase())
+        .filter(Boolean);
+    if (words.length === 0) return true;
+    const haystack = runSearchText(run);
+    return words.every((word) => haystack.includes(word));
 }
 
 // Extract a stable hash-like identifier for the dandi-compute/dandi-compute-core source
@@ -280,6 +325,7 @@ function isFilterActive(filter) {
         filter.dandisetId ||
         filter.subject ||
         filter.session ||
+        filter.pipeline ||
         filter.pipelineVersion ||
         filter.paramsType ||
         filter.configType ||
@@ -287,7 +333,8 @@ function isFilterActive(filter) {
         filter.assetSize ||
         filter.failureStep ||
         filter.status ||
-        filter.source
+        filter.source ||
+        filter.text?.trim()
     );
 }
 
@@ -364,9 +411,18 @@ function applyFilter(runs, filter) {
         if (filter.dandisetId && r.dandisetId !== filter.dandisetId) return false;
         if (filter.subject && r.subject !== filter.subject) return false;
         if (filter.session && r.session !== filter.session) return false;
+        if (filter.pipeline && pipelineDisplayName(r.pipelineName) !== pipelineDisplayName(filter.pipeline))
+            return false;
         if (filter.pipelineVersion && r.pipelineVersion !== filter.pipelineVersion) return false;
-        if (!matchesResolvedOrRawValue(filter.paramsType, runParamsType(r), r.paramsProfile)) return false;
-        if (!matchesResolvedOrRawValue(filter.configType, runConfigType(r), r.configHash)) return false;
+        if (filter.text && !matchesSearchText(r, filter.text)) return false;
+        // Only Common Issues runs carry a source (the queue they were read from).
+        if (filter.source && r.source && r.source !== filter.source) return false;
+        // Registry alias lookups are skipped unless filtered on: suggestion
+        // counts run this over every job on each keystroke.
+        if (filter.paramsType && !matchesResolvedOrRawValue(filter.paramsType, runParamsType(r), r.paramsProfile))
+            return false;
+        if (filter.configType && !matchesResolvedOrRawValue(filter.configType, runConfigType(r), r.configHash))
+            return false;
         if (filter.dandiCodebaseHash && runDandiCodebaseHash(r) !== filter.dandiCodebaseHash) return false;
         if (filter.dandiCodebaseVersion && r.codebase !== filter.dandiCodebaseVersion) return false;
         if (filter.assetSize && !matchesAssetSizeExpr(r, filter.assetSize)) return false;
@@ -397,6 +453,7 @@ function narrowUrl(params) {
     if (params.dandiset) sp.set("dandiset", params.dandiset);
     if (params.subject) sp.set("subject", params.subject);
     if (params.session) sp.set("session", params.session);
+    if (params.pipeline) sp.set("pipeline", params.pipeline);
     if (params.pipelineVersion) sp.set("version", params.pipelineVersion);
     if (params.paramsType) sp.set("params", params.paramsType);
     if (params.configType) sp.set("config", params.configType);
@@ -405,6 +462,7 @@ function narrowUrl(params) {
     if (params.failureStep) sp.set("failureStep", params.failureStep);
     if (params.status) sp.set("status", params.status);
     if (params.source) sp.set("source", params.source);
+    if (params.text?.trim()) sp.set("q", params.text.trim());
     const qs = sp.toString();
     return qs ? `?${qs}` : "./";
 }
@@ -439,7 +497,7 @@ function runByteCount(run) {
 // bytes). The "GB" unit and surrounding whitespace are optional, so all of
 // "> 10", ">10 GB", and ">50 GB, <100 GB" are accepted. Operators: > >= < <= =.
 const ASSET_SIZE_GB = 1e9;
-const ASSET_SIZE_SUGGESTIONS = ["> 10", "> 50", "< 10", "> 50, < 100", ">= 100"];
+const ASSET_SIZE_SUGGESTIONS = [">10", ">50", ">=100", "<10", "<100"];
 const ASSET_SIZE_CLAUSE_PATTERN = /^(>=|<=|==|=|>|<)\s*([0-9]*\.?[0-9]+)\s*(?:gb?)?$/i;
 
 // Parse an expression into [{ op, bytes }] clauses, or null when empty/invalid
@@ -497,6 +555,7 @@ function filterNarrowParams(filter, omit = []) {
         dandiset: filter.dandisetId,
         subject: filter.subject,
         session: filter.session,
+        pipeline: filter.pipeline,
         pipelineVersion: filter.pipelineVersion,
         paramsType: filter.paramsType,
         configType: filter.configType,
@@ -505,6 +564,7 @@ function filterNarrowParams(filter, omit = []) {
         failureStep: filter.failureStep,
         status: filter.status,
         source: filter.source,
+        text: filter.text,
     };
     for (const key of omit) delete all[key];
     return all;
@@ -528,125 +588,426 @@ function formatByteCount(value) {
     return `${DATA_SIZE_FORMATTER.format(scaledValue)} ${DECIMAL_DATA_SIZE_UNITS[unitIndex]}`;
 }
 
-function renderFilterInput(name, label, value, suggestions, clearHref = null, placeholder = "") {
-    const listId = `filter-options-${name}`;
-    const options = suggestions.map((item) => `<option value="${e(item)}"></option>`).join("");
-    const clearBtn = clearHref
-        ? `<a class="filter-input-clear${value ? " filter-input-clear-active" : ""}" href="${e(clearHref)}" title="Clear ${label} filter" aria-label="Clear ${label} filter">×</a>`
-        : "";
-    const placeholderAttr = placeholder ? ` placeholder="${e(placeholder)}"` : "";
-    return `
-<label class="filter-input-wrap">
-    <span class="filter-input-label">${label}</span>
-    <span class="filter-input-row">
-        <input class="filter-input" name="${name}" value="${e(value ?? "")}" list="${listId}" autocomplete="off"${placeholderAttr}>
-        ${clearBtn}
-    </span>
-    <datalist id="${listId}">${options}</datalist>
-</label>`;
+/* ─── Search bar ────────────────────────────────────────────── */
+// One search bar filters the queue views, after the record search on
+// CodyCBakerPhD/website (itself after DANDI's): free text plus key:value terms
+// such as pipeline:lfp or status:failed, every one of which must match, with a
+// dropdown suggesting the filter keys and the values jobs in view actually have
+// (each with how many jobs have it, given the search's other terms). The terms
+// map onto the URL params the dashboard has always used (see parseFilter), so
+// narrow links, summary stats, and shared URLs keep working.
+//
+// Typing only drafts a search. It applies on Enter, on picking a value from
+// the suggestions, or on clearing it (see commitSearch): applying re-scopes the
+// loaded queue and restarts hydration, which is too heavy to do per keystroke.
+
+const SEARCH_MAX_VALUE_SUGGESTIONS = 10;
+const SEARCH_SUGGESTIONS_ID = "run-search-suggestions";
+
+// The search's filter keys, in the order the search bar writes them. `field` is
+// the parseFilter() field a key reads and `param` the narrowUrl() param it
+// writes. A key reads its values off each job (`values`) or offers a fixed set
+// of `options` whose job counts come from applyFilter. A `multiple` key ANDs
+// its terms together (size:>10 size:<100); any other keeps only its last term.
+// `views` limits a key to those views and `excludeViews` keeps it off those.
+// Options are functions as some read constants declared further down the file.
+const SEARCH_FILTERS = [
+    {
+        key: "dandiset",
+        field: "dandisetId",
+        param: "dandiset",
+        description: "Dandiset ID",
+        values: (run) => [run.dandisetId],
+    },
+    { key: "subject", field: "subject", param: "subject", description: "Subject", values: (run) => [run.subject] },
+    { key: "session", field: "session", param: "session", description: "Session", values: (run) => [run.session] },
+    {
+        key: "pipeline",
+        field: "pipeline",
+        param: "pipeline",
+        description: "Pipeline",
+        values: (run) => [run.pipelineName ? pipelineDisplayName(run.pipelineName) : null],
+        swatch: (value) => `run-tag-pipeline ${pipelineTagClass(value)}`,
+    },
+    {
+        key: "version",
+        field: "pipelineVersion",
+        param: "pipelineVersion",
+        description: "Pipeline version",
+        values: (run) => [run.pipelineVersion],
+    },
+    {
+        key: "params",
+        field: "paramsType",
+        param: "paramsType",
+        description: "Params type",
+        values: (run) => [runParamsType(run)],
+    },
+    {
+        key: "config",
+        field: "configType",
+        param: "configType",
+        description: "Config type",
+        values: (run) => [runConfigType(run)],
+    },
+    {
+        key: "codebase",
+        field: "dandiCodebaseVersion",
+        param: "dandiCodebaseVersion",
+        description: "DANDI Compute codebase version",
+        values: (run) => [run.codebase],
+    },
+    {
+        key: "size",
+        field: "assetSize",
+        param: "assetSize",
+        description: "Asset size in GB, such as size:>10",
+        options: () => ASSET_SIZE_SUGGESTIONS,
+        multiple: true,
+        validate: (value) => parseAssetSizeExpr(value) !== null,
+        invalid: "Write sizes in GB, like size:>10 or size:<=100.",
+    },
+    {
+        key: "status",
+        field: "status",
+        param: "status",
+        description: "Job status",
+        options: () => Object.keys(STATUS_LABELS),
+        // Every job on the Common Issues page failed.
+        excludeViews: ["issues"],
+    },
+    {
+        key: "failure",
+        field: "failureStep",
+        param: "failureStep",
+        description: "Step a failed job failed in",
+        options: (runs) =>
+            uniqueSortedValues([
+                ...FAILURE_STEP_FILTER_OPTIONS,
+                ...runs
+                    .filter((run) => isFailedStatus(run.status))
+                    .map((run) => run.failureStep)
+                    .filter((step) => step !== "other"),
+            ]),
+    },
+    {
+        key: "source",
+        field: "source",
+        param: "source",
+        description: "Queue a failed job is kept in",
+        options: () => Object.keys(ISSUE_SOURCE_LABELS),
+        // A source:… search only loads that queue, so the other one is offered
+        // without a count (it isn't loaded to count).
+        offerAll: true,
+        hint: (value) => ISSUE_SOURCE_LABELS[value] ?? value,
+        views: ["issues"],
+    },
+];
+
+// Other names a key answers to: the old filter labels and URL param names.
+const SEARCH_KEY_ALIASES = {
+    sub: "subject",
+    ses: "session",
+    ver: "version",
+    codebaseversion: "codebase",
+    failurestep: "failure",
+    assetsize: "size",
+};
+
+function searchFiltersForView(viewMode = _viewMode) {
+    return SEARCH_FILTERS.filter(
+        (def) => (!def.views || def.views.includes(viewMode)) && !def.excludeViews?.includes(viewMode)
+    );
 }
 
-function renderFilterBanner(filter, availableRuns = []) {
-    const banner = document.getElementById("filter-banner");
-    const layoutMode = parseLayoutMode();
-    const sortMode = parseSortMode();
-    const sortDirection = parseSortDirection();
-    const isFiltered = isFilterActive(filter);
+function resolveSearchFilter(key, viewMode = _viewMode) {
+    if (key === null || key === undefined) return undefined;
+    const canonical = SEARCH_KEY_ALIASES[key] ?? key;
+    return searchFiltersForView(viewMode).find((def) => def.key === canonical);
+}
 
-    const crumbs = [];
-    if (filter.dandisetId) {
-        crumbs.push(
-            `<a class="filter-crumb" href="${narrowUrl({ dandiset: filter.dandisetId })}">Dandiset&nbsp;${e(filter.dandisetId)}</a>`
-        );
-    }
-    if (filter.subject) {
-        crumbs.push(
-            `<a class="filter-crumb" href="${narrowUrl({ dandiset: filter.dandisetId, subject: filter.subject })}">Sub:&nbsp;${e(filter.subject)}</a>`
-        );
-    }
-    if (filter.session) {
-        crumbs.push(
-            `<a class="filter-crumb" href="${narrowUrl({ dandiset: filter.dandisetId, subject: filter.subject, session: filter.session })}">Ses:&nbsp;${e(filter.session)}</a>`
-        );
-    }
-    if (filter.pipelineVersion) {
-        crumbs.push(
-            `<a class="filter-crumb" href="${e(narrowUrl({ pipelineVersion: filter.pipelineVersion }))}">Ver:&nbsp;${e(filter.pipelineVersion)}</a>`
-        );
-    }
-    if (filter.paramsType) {
-        crumbs.push(
-            `<a class="filter-crumb" href="${e(narrowUrl({ paramsType: filter.paramsType }))}">Params:&nbsp;${e(filter.paramsType)}</a>`
-        );
-    }
-    if (filter.configType) {
-        crumbs.push(
-            `<a class="filter-crumb" href="${e(narrowUrl({ configType: filter.configType }))}">Config:&nbsp;${e(filter.configType)}</a>`
-        );
-    }
-    if (filter.dandiCodebaseVersion) {
-        crumbs.push(
-            `<a class="filter-crumb" href="${e(narrowUrl({ dandiCodebaseVersion: filter.dandiCodebaseVersion }))}">Compute&nbsp;ver:&nbsp;${e(filter.dandiCodebaseVersion)}</a>`
-        );
-    }
-    if (filter.assetSize) {
-        crumbs.push(
-            `<a class="filter-crumb" href="${e(narrowUrl({ assetSize: filter.assetSize }))}">Size:&nbsp;${e(filter.assetSize)}</a>`
-        );
-    }
-    if (filter.failureStep) {
-        const failureStepLabel =
-            filter.failureStep === "exclude-job-dispatch"
-                ? "Failed (except dispatch)"
-                : filter.failureStep === "pre-processing"
-                  ? "Failed in pre-processing"
-                  : filter.failureStep === "post-processing"
-                    ? "Failed in post-processing"
-                    : `Failed in ${filter.failureStep}`;
-        crumbs.push(
-            `<a class="filter-crumb" href="${e(narrowUrl({ failureStep: filter.failureStep }))}">${e(failureStepLabel)}</a>`
-        );
-    }
-    if (filter.status) {
-        const statusLabel = normalizeStatus(filter.status);
-        const summaryStatusLabel = STATUS_LABELS[statusLabel] ?? `Status: ${filter.status}`;
-        crumbs.push(
-            `<a class="filter-crumb" href="${e(narrowUrl({ status: filter.status }))}">${e(summaryStatusLabel)}</a>`
-        );
-    }
-    if (filter.source) {
-        crumbs.push(
-            `<a class="filter-crumb" href="${e(narrowUrl({ source: filter.source }))}">${e(ISSUE_SOURCE_LABELS[filter.source] ?? `Source: ${filter.source}`)}</a>`
-        );
-    }
+function normalizeSearchText(text) {
+    return String(text ?? "")
+        .toLowerCase()
+        .replace(/\s+/g, " ")
+        .trim();
+}
 
-    const runsMatchingDandiset = filter.dandisetId
-        ? availableRuns.filter((run) => run.dandisetId === filter.dandisetId)
-        : availableRuns;
-    const runsMatchingSubject = filter.subject
-        ? runsMatchingDandiset.filter((run) => run.subject === filter.subject)
-        : runsMatchingDandiset;
-    const dandisets = uniqueSortedValues(availableRuns.map((r) => r.dandisetId));
-    const subjects = uniqueSortedValues(runsMatchingDandiset.map((r) => r.subject));
-    const sessions = uniqueSortedValues(runsMatchingSubject.map((r) => r.session));
-    const versions = uniqueSortedValues(availableRuns.map((r) => r.pipelineVersion));
-    const paramsTypes = uniqueSortedValues(availableRuns.map(runParamsType));
-    const configTypes = uniqueSortedValues(availableRuns.map(runConfigType));
-    const dandiCodebaseVersions = uniqueSortedValues(availableRuns.map((r) => r.codebase));
-    const failureSteps = uniqueSortedValues([
-        ...FAILURE_STEP_FILTER_OPTIONS,
-        ...availableRuns
-            .filter((run) => isFailedStatus(run.status))
-            .map((run) => run.failureStep)
-            .filter((step) => step !== "other"),
-    ]);
-    const filteredViewHtml = isFiltered
-        ? `<div class="filter-banner-active">
-    <span class="filter-banner-label">Filtered view:</span>
-    <span class="filter-crumbs">${crumbs.join('<span class="filter-sep">/</span>')}</span>
-</div>`
-        : "";
+// Splits a search into terms at whitespace outside double quotes (quotes keep a
+// phrase or value together). A key:value term carries its key, lowercased; a
+// term opening with a quote is literal text even if it holds a colon.
+function parseSearchTerms(query) {
+    const text = String(query ?? "");
+    const terms = [];
+    let position = 0;
+    while (position < text.length) {
+        if (/\s/.test(text[position])) {
+            position++;
+            continue;
+        }
+        const start = position;
+        let quoted = false;
+        while (position < text.length && (quoted || !/\s/.test(text[position]))) {
+            quoted = text[position] === '"' ? !quoted : quoted;
+            position++;
+        }
+        const raw = text.slice(start, position);
+        const filter = /^([a-z][\w-]*):(.*)$/is.exec(raw);
+        terms.push({
+            start,
+            end: position,
+            raw,
+            key: filter ? filter[1].toLowerCase() : null,
+            value: (filter ? filter[2] : raw).replace(/"/g, ""),
+        });
+    }
+    return terms;
+}
 
+function formatSearchTerm(key, value) {
+    const text = String(value);
+    return `${key}:${/[\s"]/.test(text) ? `"${text.replace(/"/g, "")}"` : text}`;
+}
+
+function editDistance(a, b) {
+    let previous = Array.from({ length: b.length + 1 }, (_, index) => index);
+    for (let i = 1; i <= a.length; i++) {
+        const current = [i];
+        for (let j = 1; j <= b.length; j++) {
+            current[j] = Math.min(
+                previous[j] + 1,
+                current[j - 1] + 1,
+                previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
+            );
+        }
+        previous = current;
+    }
+    return previous[b.length];
+}
+
+// The key a mistyped one most likely meant, if any is close.
+function closestSearchFilter(key, viewMode = _viewMode) {
+    const ranked = searchFiltersForView(viewMode)
+        .map((def) => ({ def, distance: editDistance(key, def.key) }))
+        .sort((a, b) => a.distance - b.distance);
+    return ranked.length > 0 && ranked[0].distance <= 2 ? ranked[0].def : undefined;
+}
+
+// The narrowUrl() params a search's terms stand for, and descriptions of any
+// terms that could not be used as typed. A term whose key is no filter is
+// searched as text, like the reference search does.
+function searchTermsToParams(terms, viewMode = _viewMode) {
+    const params = {};
+    const text = [];
+    const problems = new Set();
+    const seen = new Set();
+    for (const term of terms) {
+        const def = resolveSearchFilter(term.key, viewMode);
+        if (term.key !== null && !def) {
+            const suggestion = closestSearchFilter(term.key, viewMode);
+            problems.add(
+                `There is no ${term.key}: filter, so it was searched as text.${suggestion ? ` Did you mean ${suggestion.key}:?` : ""}`
+            );
+        }
+        const value = term.value.trim();
+        if (!value) continue;
+        if (!def) {
+            text.push(term.raw);
+            continue;
+        }
+        if (def.validate && !def.validate(value)) {
+            problems.add(def.invalid);
+            continue;
+        }
+        if (def.multiple) {
+            params[def.param] = params[def.param] ? `${params[def.param]}, ${value}` : value;
+        } else {
+            if (seen.has(def.key)) problems.add(`Only the last ${def.key}: term is used.`);
+            params[def.param] = value;
+        }
+        seen.add(def.key);
+    }
+    if (text.length > 0) params.text = text.join(" ");
+    return { params, problems: [...problems] };
+}
+
+// The parseFilter()-shaped filter a search's terms stand for.
+function searchTermsToFilter(terms, viewMode = _viewMode) {
+    const { params } = searchTermsToParams(terms, viewMode);
+    const filter = {};
+    for (const def of SEARCH_FILTERS) filter[def.field] = params[def.param] ?? null;
+    filter.text = params.text ?? null;
+    return filter;
+}
+
+// The search text a filter set reads as: its terms in SEARCH_FILTERS order,
+// then its free text.
+function filterToSearchText(filter, viewMode = _viewMode) {
+    const terms = [];
+    for (const def of searchFiltersForView(viewMode)) {
+        const value = filter?.[def.field];
+        if (value === null || value === undefined || String(value).trim() === "") continue;
+        const values = def.multiple
+            ? String(value)
+                  .split(",")
+                  .map((part) => part.replace(/\s+/g, ""))
+                  .filter(Boolean)
+            : [String(value)];
+        for (const item of values) terms.push(formatSearchTerm(def.key, item));
+    }
+    const text = filter?.text?.trim();
+    if (text) terms.push(text);
+    return terms.join(" ");
+}
+
+// The URL a search applies: its filters on the page's view, layout, and sort.
+function searchTextToUrl(text) {
+    return narrowUrl(searchTermsToParams(parseSearchTerms(text)).params);
+}
+
+// Apply a search: in place when the loaded queue can be re-scoped (see
+// initInPageFilterNavigation), by navigating otherwise. Returns whether the
+// filter set changed.
+function commitSearch(text) {
+    const url = new URL(searchTextToUrl(text), window.location.href);
+    if (filterStateKey(parseFilter(url.search)) === filterStateKey(parseFilter())) return false;
+    if (_activeFilterKey !== null && isInPageFilterUrl(url)) {
+        window.history.pushState(null, "", `${url.pathname}${url.search}`);
+        handleInPageFilterUrlChange();
+    } else {
+        window.location.assign(url.href);
+    }
+    return true;
+}
+
+/* The jobs and applied filter the search bar reflects (see renderFilterBanner). */
+let _searchRuns = [];
+let _searchFilter = {};
+
+// Whether the search typed differs from the one applied (both read through
+// the search, so the order of terms and spelling of keys don't count).
+function isSearchPending(text) {
+    const draft = searchTermsToFilter(parseSearchTerms(text));
+    const applied = searchTermsToFilter(parseSearchTerms(filterToSearchText(_searchFilter)));
+    return filterStateKey(draft) !== filterStateKey(applied);
+}
+
+// Each value of a key among `runs`, with how many of them have it, most
+// common first. Option keys list only the options some job matches.
+function searchValueCounts(def, runs) {
+    const counts = new Map();
+    if (def.values) {
+        for (const run of runs) {
+            for (const value of new Set(def.values(run))) {
+                if (value === null || value === undefined || value === "") continue;
+                counts.set(String(value), (counts.get(String(value)) ?? 0) + 1);
+            }
+        }
+    } else {
+        for (const option of def.options(runs)) {
+            const count = applyFilter(runs, { [def.field]: option }).length;
+            if (count > 0 || def.offerAll) counts.set(option, count);
+        }
+    }
+    return [...counts]
+        .map(([value, count]) => ({ value, count }))
+        .sort((a, b) => b.count - a.count || FILTER_VALUE_COLLATOR.compare(a.value, b.value));
+}
+
+function searchFilterHasValues(def, runs) {
+    if (def.offerAll) return true;
+    if (def.values) {
+        return runs.some((run) =>
+            def.values(run).some((value) => value !== null && value !== undefined && value !== "")
+        );
+    }
+    return def.options(runs).some((option) => runs.some((run) => applyFilter([run], { [def.field]: option }).length));
+}
+
+// The term the caret is in, or an empty one where a new term would start.
+function searchTermAt(text, caret) {
+    return (
+        parseSearchTerms(text).find((term) => term.start <= caret && caret <= term.end) ?? {
+            start: caret,
+            end: caret,
+            raw: "",
+            key: null,
+            value: "",
+        }
+    );
+}
+
+// The suggestions for the term at the caret, in labeled groups: a known key's
+// values among the jobs its other terms leave (so a version: term only offers
+// versions some job in view ran), a near miss for an unknown key, or else the
+// filter keys, led by any values matching the text typed so far.
+function searchSuggestionGroups(text, caret, runs, viewMode = _viewMode) {
+    const term = searchTermAt(text, caret);
+    const others = parseSearchTerms(text).filter((other) => other.start !== term.start);
+    const otherFilter = searchTermsToFilter(others, viewMode);
+    const valueSuggestions = (def, typed) => {
+        // A single-valued key's new term replaces its old one, so the old one
+        // doesn't narrow its own suggestions.
+        const base = applyFilter(runs, def.multiple ? otherFilter : { ...otherFilter, [def.field]: null });
+        return searchValueCounts(def, base)
+            .filter(({ value }) => normalizeSearchText(value).includes(typed))
+            .slice(0, SEARCH_MAX_VALUE_SUGGESTIONS)
+            .map(({ value, count }) => ({
+                text: formatSearchTerm(def.key, value),
+                key: def.key,
+                value,
+                hint: def.hint ? def.hint(value) : String(count),
+                count,
+                counted: !def.hint,
+                complete: true,
+                swatch: def.swatch?.(value) ?? null,
+            }));
+    };
+    const filterSuggestion = (def) => ({
+        text: `${def.key}:`,
+        key: def.key,
+        value: "",
+        hint: def.description,
+        complete: false,
+    });
+
+    if (term.key !== null) {
+        const def = resolveSearchFilter(term.key, viewMode);
+        if (def)
+            return {
+                term,
+                groups: [
+                    { label: def.description, suggestions: valueSuggestions(def, normalizeSearchText(term.value)) },
+                ],
+            };
+        const suggestion = closestSearchFilter(term.key, viewMode);
+        return {
+            term,
+            groups: suggestion ? [{ label: "Did you mean", suggestions: [filterSuggestion(suggestion)] }] : [],
+        };
+    }
+    const typed = normalizeSearchText(term.value);
+    // Only keys some job in view has a value for.
+    const available = searchFiltersForView(viewMode).filter((def) => searchFilterHasValues(def, runs));
+    const groups = [
+        {
+            label: "Filters",
+            suggestions: available
+                .filter((def) => def.key.startsWith(typed) || def.description.toLowerCase().includes(typed))
+                .map(filterSuggestion),
+        },
+    ];
+    if (typed.length >= 2) {
+        const values = available
+            .flatMap((def) => valueSuggestions(def, typed))
+            .sort((a, b) => b.count - a.count)
+            .slice(0, SEARCH_MAX_VALUE_SUGGESTIONS);
+        groups.unshift({ label: "Matching values", suggestions: values });
+    }
+    return { term, groups };
+}
+
+function renderScopedPageBanner() {
     const scopedPageBanners = {
         tests: {
             label: "🧪 Tests",
@@ -662,110 +1023,311 @@ function renderFilterBanner(filter, availableRuns = []) {
         },
     };
     const scopedBanner = scopedPageBanners[_viewMode];
-    const testsPageHtml = scopedBanner
+    return scopedBanner
         ? `<div class="tests-page-banner">
     <span class="tests-page-label">${scopedBanner.label}</span>
     <span class="tests-page-desc">${scopedBanner.desc}</span>
     <a class="tests-back-link" href="?view=dashboard">← Back to dashboard</a>
 </div>`
         : "";
+}
 
-    const viewHiddenInput = _viewMode ? `<input type="hidden" name="view" value="${_viewMode}">` : "";
-    const layoutHiddenInput = `<input type="hidden" name="layout" value="${layoutMode}">`;
-    const sortHiddenInput = `<input type="hidden" name="sort" value="${sortMode}">`;
-    const sortDirectionHiddenInput = `<input type="hidden" name="sortDir" value="${sortDirection}">`;
-    const statuses = Object.keys(STATUS_LABELS);
-    const clearAllParams = new URLSearchParams();
-    clearAllParams.set("layout", layoutMode);
-    clearAllParams.set("sort", sortMode);
-    clearAllParams.set("sortDir", sortDirection);
-    if (QUEUE_VIEW_MODES.has(_viewMode)) clearAllParams.set("view", _viewMode);
-    const clearAllHref = `?${clearAllParams.toString()}`;
-    // The Common Issues page only ever shows failed jobs, so its Status filter
-    // is replaced by a Source filter (main queue vs. failed-runs archive).
-    const isIssuesView = _viewMode === "issues";
-    const statusOrSourceInput = isIssuesView
-        ? renderFilterInput(
-              "source",
-              "Source",
-              filter.source,
-              Object.keys(ISSUE_SOURCE_LABELS),
-              narrowUrl(filterNarrowParams(filter, ["source"])),
-              "main or archive"
-          )
-        : renderFilterInput(
-              "status",
-              "Status",
-              filter.status,
-              statuses,
-              narrowUrl(filterNarrowParams(filter, ["status"]))
-          );
+const SEARCH_ICON_HTML = `<svg class="run-search-icon" viewBox="0 0 16 16" aria-hidden="true"><path d="M11.5 7a4.5 4.5 0 1 1-9 0 4.5 4.5 0 0 1 9 0Zm-.82 4.74a6 6 0 1 1 1.06-1.06l3.04 3.04a.75.75 0 1 1-1.06 1.06l-3.04-3.04Z"/></svg>`;
 
-    banner.innerHTML = `
-${testsPageHtml}<div class="filter-banner-main">
-    <span class="filter-banner-label">Filter runs:</span>
-    <form class="filter-form" method="get" action="">
-        ${viewHiddenInput}
-        ${layoutHiddenInput}
-        ${sortHiddenInput}
-        ${sortDirectionHiddenInput}
-        ${renderFilterInput("dandiset", "Dandiset", filter.dandisetId, dandisets, narrowUrl(filterNarrowParams(filter, ["dandiset", "subject", "session"])))}
-        ${renderFilterInput("subject", "Subject", filter.subject, subjects, narrowUrl(filterNarrowParams(filter, ["subject", "session"])))}
-        ${renderFilterInput("session", "Session", filter.session, sessions, narrowUrl(filterNarrowParams(filter, ["session"])))}
-        ${renderFilterInput("assetSize", "Asset Size (GB)", filter.assetSize, ASSET_SIZE_SUGGESTIONS, narrowUrl(filterNarrowParams(filter, ["assetSize"])), "e.g. >10  or  >50, <100")}
-        ${renderFilterInput("params", "Params Type", filter.paramsType, paramsTypes, narrowUrl(filterNarrowParams(filter, ["paramsType"])))}
-        ${renderFilterInput("config", "Config Type", filter.configType, configTypes, narrowUrl(filterNarrowParams(filter, ["configType"])))}
-        ${renderFilterInput("version", "Pipeline Version", filter.pipelineVersion, versions, narrowUrl(filterNarrowParams(filter, ["pipelineVersion"])))}
-        ${renderFilterInput("codebaseVersion", "Compute Codebase Version", filter.dandiCodebaseVersion, dandiCodebaseVersions, narrowUrl(filterNarrowParams(filter, ["dandiCodebaseVersion"])))}
-        ${statusOrSourceInput}
-        ${renderFilterInput("failureStep", "Failure Step", filter.failureStep, failureSteps, narrowUrl(filterNarrowParams(filter, ["failureStep"])))}
-        <div class="filter-actions">
-            <a class="filter-clear" href="${clearAllHref}">× ${isIssuesView ? "View all issues" : "View all runs"}</a>
-            <button class="filter-apply" type="submit">Apply</button>
-        </div>
-    </form>
-</div>
-${filteredViewHtml}`;
+function searchNoun() {
+    return _viewMode === "issues" ? "failed jobs" : "jobs";
+}
 
-    const form = banner.querySelector(".filter-form");
-    const dandisetInput = form?.querySelector('input[name="dandiset"]');
-    const subjectInput = form?.querySelector('input[name="subject"]');
-    const sessionInput = form?.querySelector('input[name="session"]');
-    const subjectDatalist = banner.querySelector("#filter-options-subject");
-    const sessionDatalist = banner.querySelector("#filter-options-session");
-    const renderDatalistOptions = (datalist, values) => {
-        if (!datalist) return;
-        datalist.innerHTML = values.map((item) => `<option value="${e(item)}"></option>`).join("");
+function renderSearchForm() {
+    const placeholder =
+        _viewMode === "issues"
+            ? "Search failed jobs, e.g. source:archive failure:pre-processing"
+            : "Search jobs, e.g. pipeline:aind-ephys status:failed";
+    return `<form class="run-search" role="search" data-view="${e(String(_viewMode))}">
+    <div class="run-search-field">
+        ${SEARCH_ICON_HTML}
+        <input type="search" class="run-search-input" name="q" placeholder="${e(placeholder)}" aria-label="Search ${searchNoun()}" autocomplete="off" spellcheck="false" role="combobox" aria-autocomplete="list" aria-expanded="false" aria-controls="${SEARCH_SUGGESTIONS_ID}">
+        <ul class="run-search-suggestions" id="${SEARCH_SUGGESTIONS_ID}" role="listbox" aria-label="Suggestions" tabindex="-1" hidden></ul>
+    </div>
+    <div class="run-search-summary">
+        <p class="run-search-status" role="status"></p>
+        <button type="button" class="run-search-clear" hidden>Clear search</button>
+    </div>
+</form>`;
+}
+
+// The line under the search: how many jobs it shows, whether the typed search
+// is yet to be applied, and any terms that could not be used as typed.
+function updateSearchStatus(form) {
+    const input = form.querySelector(".run-search-input");
+    const status = form.querySelector(".run-search-status");
+    const clear = form.querySelector(".run-search-clear");
+    if (!input || !status || !clear) return;
+    const { problems } = searchTermsToParams(parseSearchTerms(input.value));
+    const parts = [];
+    if (_searchRuns.length > 0) {
+        // The Common Issues page ignores any status filter (every job failed).
+        const filter = _viewMode === "issues" ? { ..._searchFilter, status: null } : _searchFilter;
+        parts.push(
+            isFilterActive(filter)
+                ? `Showing ${applyFilter(_searchRuns, filter).length} of ${_searchRuns.length} ${searchNoun()}.`
+                : `${_searchRuns.length} ${searchNoun()}.`
+        );
+    }
+    if (isSearchPending(input.value)) parts.push("Press Enter to apply.");
+    parts.push(...problems);
+    status.textContent = parts.join(" ");
+    clear.hidden = !input.value.trim() && !isFilterActive(_searchFilter);
+}
+
+function refreshSearchStatus() {
+    const form = document.querySelector("#filter-banner .run-search");
+    if (form) updateSearchStatus(form);
+}
+
+// Wire up a freshly rendered search form: the suggestion dropdown (a listbox
+// driven from the input, as a combobox) and applying the search.
+function initSearchForm(form) {
+    const input = form.querySelector(".run-search-input");
+    const list = form.querySelector(".run-search-suggestions");
+    const clear = form.querySelector(".run-search-clear");
+    let suggestions = [];
+    let active = -1;
+
+    const highlight = (index) => {
+        active = index;
+        list.querySelectorAll("[role=option]").forEach((option, position) => {
+            option.setAttribute("aria-selected", String(position === index));
+            if (position === index) option.scrollIntoView?.({ block: "nearest" });
+        });
+        if (index >= 0) input.setAttribute("aria-activedescendant", `${SEARCH_SUGGESTIONS_ID}-${index}`);
+        else input.removeAttribute("aria-activedescendant");
     };
-    const refreshDependentFilterOptions = () => {
-        const selectedDandiset = dandisetInput?.value ?? "";
-        const nextRunsMatchingDandiset = selectedDandiset
-            ? availableRuns.filter((run) => run.dandisetId === selectedDandiset)
-            : availableRuns;
-        const nextSubjects = uniqueSortedValues(nextRunsMatchingDandiset.map((run) => run.subject));
-        renderDatalistOptions(subjectDatalist, nextSubjects);
-        if (subjectInput && subjectInput.value && !nextSubjects.includes(subjectInput.value)) {
-            subjectInput.value = "";
+
+    const closeSuggestions = () => {
+        list.hidden = true;
+        list.replaceChildren();
+        suggestions = [];
+        input.setAttribute("aria-expanded", "false");
+        highlight(-1);
+    };
+
+    const apply = () => {
+        closeSuggestions();
+        commitSearch(input.value);
+        updateSearchStatus(form);
+    };
+
+    const choose = (index) => {
+        const suggestion = suggestions[index];
+        if (!suggestion) return;
+        const term = searchTermAt(input.value, input.selectionStart ?? input.value.length);
+        const before = input.value.slice(0, term.start);
+        const after = input.value.slice(term.end);
+        const inserted = suggestion.complete ? `${suggestion.text} ` : suggestion.text;
+        input.value = before + inserted + (suggestion.complete ? after.trimStart() : after);
+        const caret = before.length + inserted.length;
+        input.setSelectionRange(caret, caret);
+        if (suggestion.complete) {
+            apply();
+        } else {
+            updateSearchStatus(form);
+            openSuggestions();
+        }
+    };
+
+    const openSuggestions = () => {
+        const { term, groups } = searchSuggestionGroups(
+            input.value,
+            input.selectionStart ?? input.value.length,
+            _searchRuns
+        );
+        const shownGroups = groups.filter((group) => group.suggestions.length > 0);
+        suggestions = shownGroups.flatMap((group) => group.suggestions);
+        if (suggestions.length === 0) {
+            closeSuggestions();
+            return;
         }
 
-        const selectedSubject = subjectInput?.value ?? "";
-        const nextRunsMatchingSubject = selectedSubject
-            ? nextRunsMatchingDandiset.filter((run) => run.subject === selectedSubject)
-            : nextRunsMatchingDandiset;
-        const nextSessions = uniqueSortedValues(nextRunsMatchingSubject.map((run) => run.session));
-        renderDatalistOptions(sessionDatalist, nextSessions);
-        if (sessionInput && sessionInput.value && !nextSessions.includes(sessionInput.value)) {
-            sessionInput.value = "";
-        }
-    };
-    if (dandisetInput) {
-        dandisetInput.addEventListener("input", refreshDependentFilterOptions);
-    }
-    if (subjectInput) {
-        subjectInput.addEventListener("input", refreshDependentFilterOptions);
-    }
+        const rows = [];
+        let index = 0;
+        for (const group of shownGroups) {
+            const label = document.createElement("li");
+            label.className = "run-search-group-label";
+            label.setAttribute("role", "presentation");
+            label.textContent = group.label;
+            rows.push(label);
+            for (const suggestion of group.suggestions) {
+                const optionIndex = index++;
+                const option = document.createElement("li");
+                option.className = suggestion.complete
+                    ? "run-search-option"
+                    : "run-search-option run-search-option-filter";
+                option.id = `${SEARCH_SUGGESTIONS_ID}-${optionIndex}`;
+                option.setAttribute("role", "option");
+                option.setAttribute("aria-selected", "false");
+                option.dataset.term = suggestion.text;
 
+                const termText = document.createElement("span");
+                termText.className = "run-search-option-term";
+                if (suggestion.swatch) {
+                    const swatch = document.createElement("span");
+                    swatch.className = `run-search-swatch ${suggestion.swatch}`;
+                    swatch.setAttribute("aria-hidden", "true");
+                    termText.append(swatch);
+                }
+                const key = document.createElement("span");
+                key.className = "run-search-option-key";
+                key.textContent = `${suggestion.key}:`;
+                const value = document.createElement("span");
+                value.className = "run-search-option-value";
+                value.textContent = suggestion.text.slice(suggestion.key.length + 1);
+                termText.append(key, value);
+
+                const hint = document.createElement("span");
+                hint.className = suggestion.counted ? "run-search-option-count" : "run-search-option-hint";
+                hint.textContent = suggestion.hint;
+                if (suggestion.counted) hint.title = `${suggestion.hint} matching ${searchNoun()}`;
+
+                option.append(termText, hint);
+                option.addEventListener("click", () => choose(optionIndex));
+                option.addEventListener("mousemove", () => {
+                    if (active !== optionIndex) highlight(optionIndex);
+                });
+                rows.push(option);
+            }
+        }
+        if (term.key === null && !term.value) {
+            const tip = document.createElement("li");
+            tip.className = "run-search-tip";
+            tip.setAttribute("role", "presentation");
+            tip.textContent =
+                'Every term has to match. Quote values with spaces, as in subject:"mouse 1". Press Enter to apply.';
+            rows.push(tip);
+        }
+
+        list.replaceChildren(...rows);
+        list.hidden = false;
+        input.setAttribute("aria-expanded", "true");
+        highlight(-1);
+    };
+
+    input.addEventListener("input", () => {
+        updateSearchStatus(form);
+        openSuggestions();
+    });
+    input.addEventListener("focus", openSuggestions);
+    input.addEventListener("click", openSuggestions);
+    input.addEventListener("blur", closeSuggestions);
+    // Keeps focus in the input when the list (an option, or its scroll bar) is
+    // pressed, so it stays open.
+    list.addEventListener("mousedown", (event) => event.preventDefault());
+    input.addEventListener("keyup", (event) => {
+        // The caret may have moved to another term.
+        if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key) && !list.hidden) openSuggestions();
+    });
+    input.addEventListener("keydown", (event) => {
+        const open = !list.hidden;
+        if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+            event.preventDefault();
+            if (!open) {
+                openSuggestions();
+                return;
+            }
+            const count = suggestions.length;
+            highlight(event.key === "ArrowDown" ? (active + 1) % count : active <= 0 ? count - 1 : active - 1);
+        } else if (event.key === "Enter" && open && active >= 0) {
+            event.preventDefault();
+            choose(active);
+        } else if (event.key === "Escape") {
+            if (open) {
+                event.preventDefault();
+                closeSuggestions();
+            } else if (normalizeSearchText(input.value) !== normalizeSearchText(input.dataset.applied)) {
+                // Drop the draft, back to the search that is applied.
+                event.preventDefault();
+                input.value = input.dataset.applied ?? "";
+                updateSearchStatus(form);
+            } else if (input.value) {
+                // Then clear the search (what browsers do natively for a
+                // type="search" input, made explicit so it applies everywhere).
+                event.preventDefault();
+                input.value = "";
+                apply();
+            }
+        }
+    });
+    // The browser's own clear button (on type="search") empties the input and
+    // fires "search": that clears the search.
+    input.addEventListener("search", () => {
+        if (!input.value) apply();
+    });
+    form.addEventListener("submit", (event) => {
+        event.preventDefault();
+        // Put the (on-screen) keyboard away first, so the applied search is
+        // shown as written rather than ready for another term.
+        input.blur();
+        apply();
+    });
+    clear.addEventListener("click", () => {
+        input.value = "";
+        apply();
+        input.focus();
+    });
+}
+
+// Render the filter banner: the page's scope note (Tests/Archive/Common
+// Issues) and the search bar, over `availableRuns` (whose values the
+// suggestions offer). The form is built once per view and then updated in
+// place, so a refresh mid-typing (e.g. a hydration flush) keeps the draft,
+// focus, and caret; the input only takes the applied search when that changes.
+function renderFilterBanner(filter, availableRuns = []) {
+    const banner = document.getElementById("filter-banner");
+    if (!banner) return;
+    _searchRuns = availableRuns;
+    _searchFilter = filter ?? {};
+    let form = banner.querySelector(".run-search");
+    if (!form || form.dataset.view !== String(_viewMode)) {
+        banner.innerHTML = `${renderScopedPageBanner()}${renderSearchForm()}`;
+        form = banner.querySelector(".run-search");
+        initSearchForm(form);
+    }
+    const input = form.querySelector(".run-search-input");
+    const applied = filterToSearchText(_searchFilter);
+    if (input.dataset.applied !== applied) {
+        input.dataset.applied = applied;
+        const focused = document.activeElement === input;
+        // While focused, leave room to type the next term.
+        input.value = focused && applied ? `${applied} ` : applied;
+        if (focused) input.setSelectionRange(input.value.length, input.value.length);
+    }
+    updateSearchStatus(form);
     banner.style.display = "";
+}
+
+/* ─── Job card tags ─────────────────────────────────────────── */
+// A class naming a pipeline's tag color (see .run-tag-pipeline-* in
+// styles.css); pipelines without one take the default color.
+function pipelineTagClass(name) {
+    const slug = pipelineDisplayName(name)
+        .toLowerCase()
+        .replace(/[^a-z0-9-]+/g, "-");
+    return `run-tag-pipeline-${slug}`;
+}
+
+// The tags on a job card, reading "key | value" like the tags on the
+// CodyCBakerPhD/website record cards. Each links to the current search with its
+// term toggled (so it applies in place, or opens in a new tab on a modified
+// click). For now there is one, naming the job's pipeline.
+function renderRunTags(run) {
+    if (!run.pipelineName) return "";
+    const name = pipelineDisplayName(run.pipelineName);
+    const filter = parseFilter();
+    const active = !!filter.pipeline && pipelineDisplayName(filter.pipeline) === name;
+    const params = filterNarrowParams(filter, ["pipeline"]);
+    if (!active) params.pipeline = name;
+    const title = active ? `Stop filtering by pipeline:${name}` : `Show only ${name} jobs`;
+    return `<a class="run-tag run-tag-pipeline ${pipelineTagClass(name)}${active ? " run-tag-active" : ""}" href="${e(narrowUrl(params))}" title="${e(title)}"><span class="run-tag-key">pipeline</span><span class="run-tag-value">${e(name)}</span></a>`;
 }
 
 function setPageCopy(title, subtitleHtml) {
@@ -3044,6 +3606,7 @@ function renderRunEntry(run) {
 <div class="run-entry ${sc}" data-run-key="${e(run.path)}">
     <div class="run-entry-header">
         <span class="status-badge ${sc}${run.statusProvisional ? " status-provisional" : ""}"${run.statusProvisional ? ' title="Pass/fail pending trace confirmation"' : ""}>${slbl}</span>
+        ${renderRunTags(run)}
         ${run.runDate ? `<span class="run-date">${e(run.runDate)}</span><span class="run-sep">·</span>` : ""}
         ${run.paramsProfile ? `<span class="run-sep">·</span><span class="run-params">${renderRegistryLink("Params", run.paramsProfile, PARAMS_REGISTRY, "params")}</span>` : ""}
         ${run.configHash ? `<span class="run-sep">·</span><span class="run-config">${renderRegistryLink("Config", run.configHash, CONFIG_REGISTRY, "configs")}</span>` : ""}
@@ -3067,7 +3630,7 @@ function renderPipelineInfo(pipelineName, pipelineVersion) {
     const commitHash = pipelineCompareRef(pipelineVersion);
     const hasCommit = commitHash !== pipelineVersion;
 
-    const displayName = e(pipelineName.replace(/\+/g, "-"));
+    const displayName = e(pipelineDisplayName(pipelineName));
 
     if (hasCommit) {
         const displayVer = e(pipelineVersion.replace(/\+/g, "-"));
@@ -5101,6 +5664,7 @@ function renderFlatRunEntry(run) {
     <div class="run-entry-header flat-run-header">
         <a class="dandi-view-link" href="${dandiBaseUrl(run.dandisetId)}/dandiset/${e(run.dandisetId)}" target="_blank" rel="noopener">${DANDI_ICON_HTML}Sourcedata&nbsp;↖</a>
         <span class="status-badge ${sc}${run.statusProvisional ? " status-provisional" : ""}"${run.statusProvisional ? ' title="Pass/fail pending trace confirmation"' : ""}>${slbl}</span>
+        ${renderRunTags(run)}
         <span class="flat-run-context">
             <a class="flat-ctx-link" href="${e(neurosiftDandisetUrl(run.dandisetId))}" target="_blank" rel="noopener">${NEUROSIFT_ICON_HTML}Dandiset&nbsp;${e(run.dandisetId)}</a>
             <span class="run-sep">·</span>
@@ -6670,15 +7234,14 @@ function flushHydrationUpdates() {
     }
 
     renderSummary(isFiltered ? _filteredRuns : _runsInScope);
-    // Skip the banner while the user is typing in one of its filter inputs;
-    // the value lists catch up on the next flush.
-    const banner = document.getElementById("filter-banner");
-    if (!banner || !banner.contains(document.activeElement)) renderFilterBanner(filter, _runsInScope);
+    // Updates the search bar in place (its counts and suggestions catch up),
+    // leaving any search being typed alone.
+    renderFilterBanner(filter, _runsInScope);
 }
 
 /* ─── In-page filter changes + memory soft reset ────────────── */
-// Filter changes historically navigated (the filter form is a plain GET form;
-// crumbs, clear links, summary stats, and narrow links are plain anchors), so
+// Filter changes historically navigated (the filter form was a plain GET form;
+// summary stats, narrow links, and job card tags are plain anchors), so
 // every change rebuilt the page from scratch. Same-view filter navigations are
 // instead applied in place via history.pushState: the queue state is already in
 // memory, so the new scope renders instantly — and the switch doubles as a
@@ -6820,7 +7383,7 @@ function initInPageFilterNavigation() {
     if (_inPageFilterNavInit) return;
     _inPageFilterNavInit = true;
 
-    // Filter links (crumbs, clear links, summary stats, narrow links, priority
+    // Filter links (summary stats, narrow links, job card tags, priority
     // chips) — delegated so links from every re-render are covered, and in the
     // capture phase because the ⊕ Narrow links inside group summaries stop
     // propagation inline (to keep the click from toggling their group), which
@@ -6844,18 +7407,8 @@ function initInPageFilterNavigation() {
         true
     );
 
-    // The filter form (Apply / Enter in an input). Mirrors the native GET
-    // serialization so the resulting URL matches what a full-page submit would
-    // have produced.
-    document.addEventListener("submit", (evt) => {
-        if (_activeFilterKey === null || evt.defaultPrevented) return;
-        const form = evt.target;
-        if (!(form instanceof Element) || !form.classList.contains("filter-form")) return;
-        const qs = new URLSearchParams(new FormData(form)).toString();
-        evt.preventDefault();
-        window.history.pushState(null, "", `${window.location.pathname}${qs ? `?${qs}` : ""}`);
-        handleInPageFilterUrlChange();
-    });
+    // The search bar applies its searches through commitSearch, which takes
+    // the same in-place path.
 
     // Back/forward across pushState entries stays in-page too.
     window.addEventListener("popstate", () => {
@@ -7353,6 +7906,9 @@ function renderIssueGroup(group, rank, scannedTotal, maxCount, filter) {
 // jobs (scanned or not); groups cover the scanned ones.
 function renderIssuesPage(state) {
     const { runs, filter, done } = state;
+    // The scan settles each job's failure step, so the search's job count
+    // (and failure: suggestions) move with it.
+    refreshSearchStatus();
     // Counts are rendered into markup: coerce them to integers first.
     const scanned = Math.max(0, Math.trunc(Number(state.scanned)) || 0);
     const total = Math.max(0, Math.trunc(Number(state.total)) || 0);
@@ -7643,6 +8199,15 @@ document.addEventListener("DOMContentLoaded", init);
 if (typeof module !== "undefined" && module.exports) {
     module.exports = {
         applyFilter,
+        commitSearch,
+        filterToSearchText,
+        parseFilter,
+        parseSearchTerms,
+        pipelineDisplayName,
+        renderRunTags,
+        searchSuggestionGroups,
+        searchTermsToParams,
+        searchTextToUrl,
         blobMemoryCacheStats,
         buildInitialRun,
         buildRunPath,
