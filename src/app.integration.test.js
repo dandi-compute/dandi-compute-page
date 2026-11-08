@@ -852,6 +852,8 @@ describe("progressive queue loading", () => {
     });
 
     it("marks optimistic successes as provisional until the trace confirms them", async () => {
+        // Group badges only exist in the tree layout (flat is the default).
+        window.history.replaceState(null, "", "/?layout=tree");
         const { entry, urls } = withArtifacts(makeEntry(), { trace: newBlobId() });
         seedQueueState([entry]);
         const trace = deferred();
@@ -918,6 +920,8 @@ describe("progressive queue loading", () => {
     });
 
     it("renders tree group bodies lazily on first open", async () => {
+        // Flat is the default layout.
+        window.history.replaceState(null, "", "/?layout=tree");
         const handlers = new Map();
         const entries = [];
         for (let i = 0; i < 3; i++) {
@@ -958,6 +962,8 @@ describe("progressive queue loading", () => {
     });
 
     it("releases a group's materialized body when it closes and rebuilds it on reopen", async () => {
+        // Flat is the default layout.
+        window.history.replaceState(null, "", "/?layout=tree");
         const handlers = new Map();
         const entries = [];
         for (let i = 0; i < 3; i++) {

@@ -178,7 +178,12 @@ describe("app unit behavior", () => {
     });
 
     it("falls back to localStorage layout mode when URL query is absent", () => {
-        localStorage.setItem("layoutMode", "flat");
+        localStorage.setItem("layoutMode", "tree");
+        window.history.replaceState(null, "", "/");
+        expect(parseLayoutMode()).toBe("tree");
+    });
+
+    it("defaults to the flat layout", () => {
         window.history.replaceState(null, "", "/");
         expect(parseLayoutMode()).toBe("flat");
     });
@@ -3924,6 +3929,14 @@ describe("initLayoutToggle", () => {
         const refreshBtn = document.querySelector("[data-refresh-queue]");
         expect(refreshBtn).not.toBeNull();
         expect(refreshBtn.textContent).toMatch(/Refresh/);
+    });
+
+    it("lists the flat layout before the tree layout", () => {
+        initLayoutToggle();
+        expect([...document.querySelectorAll("[data-layout]")].map((btn) => btn.dataset.layout)).toEqual([
+            "flat",
+            "tree",
+        ]);
     });
 
     it("does not break when called multiple times", () => {
