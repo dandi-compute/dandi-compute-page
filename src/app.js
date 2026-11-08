@@ -2109,8 +2109,10 @@ const SQUEUE_POLL_INTERVAL_MS = 60 * 1000;
 // Three missed 5-minute snapshots mark the view stale.
 const SQUEUE_STALE_AFTER_MS = 15 * 60 * 1000;
 /* The disk usage snapshot (launcher/disk.sh in dandi-compute-runner) is taken
-   every 30 minutes: `df` for the home and DANDI project directories, then `du`
-   of the home directory itself. Shown on the Status page. */
+   every 30 minutes: `df` for the DANDI project directories, then the home
+   directory's quota report (ORCD's ~/orcd/.quota, the one shown at login),
+   or `du` of the home directory should that report be missing. Shown on the
+   Status page. */
 const SQUEUE_KIND = "monitor";
 const DISK_KIND = "disk";
 const DISK_POLL_INTERVAL_MS = 5 * 60 * 1000;
@@ -2528,14 +2530,75 @@ function renderUsePercent(cell) {
     return `<span class="disk-pct disk-pct-${kind}" title="${e(label)}">${e(cell)}</span>`;
 }
 
+// ORCD's quota report (~/orcd/.quota, shown at login): a "QUOTA REPORT" title,
+// a header of seven "|"-separated cells, a dashed rule, then one row per space
+// (HOME, SCRATCH, POOL) with its usage, limit and % used in GB, then in files.
+// { header, rows: [{ space, cells }] }, where `cells` are the row's seven
+// cells; null when `text` is not such a report. Read line by line, without
+// regexes that could backtrack.
+const QUOTA_REPORT_COLUMNS = 7;
+const QUOTA_SPACE_PERCENT_COLUMN = 3;
+const QUOTA_FILES_PERCENT_COLUMN = 6;
+const splitQuotaCells = (line) => line.split("|").map((cell) => cell.trim());
+function parseQuotaReport(text) {
+    const lines = String(text ?? "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter((line) => line !== "");
+    const headerIndex = lines.findIndex((line) => line.includes("|") && splitQuotaCells(line)[0] === "Space");
+    if (headerIndex < 0) return null;
+    const header = splitQuotaCells(lines[headerIndex]);
+    if (header.length !== QUOTA_REPORT_COLUMNS) return null;
+    const rows = [];
+    for (const line of lines.slice(headerIndex + 1)) {
+        // The rule under the header, e.g. "---------+--------".
+        if (line.replace(/[-+]/g, "") === "") continue;
+        const cells = splitQuotaCells(line);
+        if (cells.length !== QUOTA_REPORT_COLUMNS) return null;
+        rows.push({ space: cells[0], cells });
+    }
+    return rows.length > 0 ? { header, rows } : null;
+}
+
+// A quota report's "% Used" cell ("70.36") as a percentage; null when it is not a number.
+function parseQuotaPercent(cell) {
+    return parseUsePercent(`${cell}%`);
+}
+
+// The quota report as a table, its two "% Used" columns coloured by how full.
+function renderQuotaTable({ header, rows }) {
+    const percentColumns = new Set([QUOTA_SPACE_PERCENT_COLUMN, QUOTA_FILES_PERCENT_COLUMN]);
+    const numeric = (index) => (index > 0 ? ' class="squeue-num"' : "");
+    const head = header.map((label, index) => `<th scope="col"${numeric(index)}>${e(label)}</th>`).join("");
+    const body = rows
+        .map(({ cells }) => {
+            const tds = cells.map((cell, index) => {
+                const content =
+                    percentColumns.has(index) && parseQuotaPercent(cell) !== null
+                        ? renderUsePercent(`${cell}%`)
+                        : e(cell);
+                return `<td${numeric(index)}>${content}</td>`;
+            });
+            return `<tr>${tds.join("")}</tr>`;
+        })
+        .join("");
+    return `<table class="squeue-table disk-table disk-quota-table"><caption>Home directory quota</caption><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
 // The disk snapshot's screen: each blank-line-separated block of its output as
-// a table (the df table, then the du line), with the Use% column coloured by
-// how full the filesystem is, or as plain text when it does not parse as one.
+// a table (the df table, then the home directory's quota report, or the du
+// line when there was no report), with the Use% and % Used columns coloured by
+// how full, or as plain text when it does not parse as one.
 function renderDiskOutput(snapshot) {
     let html = "";
     const stdout = squeueScreenText(snapshot.stdout);
     const blocks = stdout ? stdout.split(/\n{2,}/) : [];
     for (const block of blocks) {
+        const quota = parseQuotaReport(block);
+        if (quota) {
+            html += renderQuotaTable(quota);
+            continue;
+        }
         // A lone line (an error message) is text, not a header without rows.
         const table = block.includes("\n") ? parseSqueueTable(block) : null;
         if (!table) {
@@ -2566,20 +2629,40 @@ function renderDiskOutput(snapshot) {
     return html;
 }
 
-// One chip per filesystem in the title bar: its mount point and how full it is.
+function renderDiskChip(label, percentCell, title) {
+    const kind = diskUsageKind(parseUsePercent(percentCell));
+    return `<span class="disk-pct disk-pct-${kind}" title="${e(title)}">${e(label)} ${e(percentCell)}</span>`;
+}
+
+// Chips in the title bar: one per filesystem of the df table (its mount point
+// and how full it is), then how full the home directory's quota is, on space
+// and on files.
 function renderDiskChips(snapshot) {
     const stdout = squeueScreenText(snapshot.stdout);
-    const table = stdout ? parseSqueueTable(stdout.split(/\n{2,}/)[0]) : null;
-    if (!table) return "";
-    const mountColumn = table.columns.findIndex(({ label }) => label === "Mounted");
-    const percentColumn = table.columns.findIndex(({ label }) => label === "Use%");
-    if (mountColumn < 0 || percentColumn < 0) return "";
-    const chips = table.rows
-        .filter((row) => parseUsePercent(row[percentColumn]) !== null)
-        .map((row) => {
-            const kind = diskUsageKind(parseUsePercent(row[percentColumn]));
-            return `<span class="disk-pct disk-pct-${kind}" title="${e(row[mountColumn])}">${e(row[mountColumn])} ${e(row[percentColumn])}</span>`;
-        });
+    const blocks = stdout ? stdout.split(/\n{2,}/) : [];
+    const chips = [];
+    const table = blocks.length > 0 && !parseQuotaReport(blocks[0]) ? parseSqueueTable(blocks[0]) : null;
+    const mountColumn = table ? table.columns.findIndex(({ label }) => label === "Mounted") : -1;
+    const percentColumn = table ? table.columns.findIndex(({ label }) => label === "Use%") : -1;
+    if (mountColumn >= 0 && percentColumn >= 0) {
+        for (const row of table.rows) {
+            if (parseUsePercent(row[percentColumn]) === null) continue;
+            chips.push(renderDiskChip(row[mountColumn], row[percentColumn], row[mountColumn]));
+        }
+    }
+    const quota = blocks.map(parseQuotaReport).find(Boolean);
+    const home = quota?.rows.find(({ space }) => space === "HOME");
+    if (home) {
+        const [, used, limit, spacePercent, files, filesLimit, filesPercent] = home.cells;
+        if (parseQuotaPercent(spacePercent) !== null) {
+            chips.push(renderDiskChip("home", `${spacePercent}%`, `Home directory: ${used} of ${limit} GB`));
+        }
+        if (parseQuotaPercent(filesPercent) !== null) {
+            chips.push(
+                renderDiskChip("home files", `${filesPercent}%`, `Home directory: ${files} of ${filesLimit} files`)
+            );
+        }
+    }
     return chips.length > 0 ? `<span class="squeue-tally">${chips.join("")}</span>` : "";
 }
 
@@ -2795,7 +2878,7 @@ function renderStatusPage() {
     </section>
     <section class="status-section" aria-labelledby="status-disk-heading">
         <h2 class="status-heading" id="status-disk-heading">Disk</h2>
-        <p class="status-note">How full the home and DANDI project filesystems are, and the home directory's own usage, as of the latest disk snapshot (taken every 30 minutes), after the DANDI Archive backup partitions as dandi/backup-status reports them daily.</p>
+        <p class="status-note">How full the DANDI project filesystems are, and the home directory's quota on space and on the number of files (ORCD's report in <code>~/orcd/.quota</code>, as shown at login), as of the latest disk snapshot (taken every 30 minutes), after the DANDI Archive backup partitions as dandi/backup-status reports them daily.</p>
         <div id="backup-status" class="backup-status"></div>
         <div id="status-disk"></div>
     </section>
