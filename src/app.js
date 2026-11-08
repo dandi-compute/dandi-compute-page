@@ -598,11 +598,13 @@ function formatByteCount(value) {
 // map onto the URL params the dashboard has always used (see parseFilter), so
 // narrow links, summary stats, and shared URLs keep working.
 //
-// Typing only drafts a search. It applies on Enter, on picking a value from
-// the suggestions, or on clearing it (see commitSearch): applying re-scopes the
-// loaded queue and restarts hydration, which is too heavy to do per keystroke.
+// The search applies as you type, once typing pauses (see liveSearchText for
+// which terms count while unfinished), and at once on Enter, on picking a
+// value, or on clearing it. The Common Issues page, which reloads to re-scan
+// logs, applies only on Enter.
 
 const SEARCH_MAX_VALUE_SUGGESTIONS = 10;
+const SEARCH_LIVE_DELAY_MS = 250;
 
 // "1.5.0", "v1.2.4", "v1", "2.0.0-rc.1", "v1.0.1+20abeb6" (missing parts read as 0).
 const VERSION_PATTERN = /^v?(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9a-z.-]+))?(?:\+[0-9a-z.-]+)?$/i;
@@ -667,6 +669,7 @@ const SEARCH_FILTERS = [
         param: "pipeline",
         description: "Pipeline",
         values: (run) => [run.pipelineName ? pipelineDisplayName(run.pipelineName) : null],
+        canonical: pipelineDisplayName,
         swatch: (value) => `run-tag-pipeline ${pipelineTagClass(value)}`,
     },
     {
@@ -908,23 +911,62 @@ function searchTextToUrl(text) {
 }
 
 // Apply a search: in place when the loaded queue can be re-scoped (see
-// initInPageFilterNavigation), by navigating otherwise. Returns whether the
-// filter set changed.
-function commitSearch(text) {
+// initInPageFilterNavigation), by navigating otherwise. A `live` search (typed,
+// not yet entered) applies only in place, and keeps the page's scroll position
+// and open groups. `replace` updates the current history entry rather than
+// adding one. Returns whether the filter set changed.
+function commitSearch(text, { live = false, replace = false } = {}) {
     const url = new URL(searchTextToUrl(text), window.location.href);
     if (filterStateKey(parseFilter(url.search)) === filterStateKey(parseFilter())) return false;
-    if (_activeFilterKey !== null && isInPageFilterUrl(url)) {
-        window.history.pushState(null, "", `${url.pathname}${url.search}`);
-        handleInPageFilterUrlChange();
+    const inPage = _activeFilterKey !== null && isInPageFilterUrl(url);
+    if (live && !inPage) return false;
+    if (inPage) {
+        window.history[replace ? "replaceState" : "pushState"](null, "", `${url.pathname}${url.search}`);
+        handleInPageFilterUrlChange({ live });
     } else {
         window.location.assign(url.href);
     }
     return true;
 }
 
+function searchAppliesLive() {
+    return _viewMode !== "issues";
+}
+
+// Whether a key's value is finished: one some job has (keys match exactly, so
+// a partial value would match nothing), or for a validated key, a valid one.
+function isCompleteSearchValue(def, value, runs) {
+    if (!value) return false;
+    if (def.validate) return def.validate(value);
+    if (def.options) return def.options(runs).some((option) => option.toLowerCase() === value.toLowerCase());
+    const canonical = def.canonical ?? String;
+    const wanted = canonical(value);
+    return runs.some((run) =>
+        def.values(run).some((candidate) => candidate != null && canonical(candidate) === wanted)
+    );
+}
+
+// The part of a search being typed that applies while typing pauses: free text,
+// and keyed terms whose value is finished. A word at the caret that could still
+// become a key (e.g. "pipe") waits, rather than briefly matching nothing.
+function liveSearchText(text, caret, runs) {
+    const keyNames = [...searchFiltersForView().map((def) => def.key), ...Object.keys(SEARCH_KEY_ALIASES)];
+    return parseSearchTerms(text)
+        .filter((term) => {
+            const def = resolveSearchFilter(term.key);
+            if (def) return isCompleteSearchValue(def, term.value.trim(), runs);
+            const atCaret = term.key === null && term.start <= caret && caret <= term.end;
+            return !atCaret || !keyNames.some((key) => key.startsWith(term.value.toLowerCase()));
+        })
+        .map((term) => term.raw)
+        .join(" ");
+}
+
 /* The jobs and applied filter the search bar reflects (see renderFilterBanner). */
 let _searchRuns = [];
 let _searchFilter = {};
+/* Set while a live search applies, so the banner keeps the text being typed. */
+let _searchApplyingLive = false;
 
 // Whether the search typed differs from the one applied (both read through
 // the search, so the order of terms and spelling of keys don't count).
@@ -1096,13 +1138,14 @@ function renderSearchForm() {
 }
 
 // The line under the search, shown only while there is something to say about
-// the search typed: that it is yet to be applied, or terms it could not use.
+// the search typed: terms it could not use, or (where it doesn't apply as you
+// type) that it is yet to be applied.
 function updateSearchStatus(form) {
     const input = form.querySelector(".run-search-input");
     const status = form.querySelector(".run-search-status");
     if (!input || !status) return;
     const { problems } = searchTermsToParams(parseSearchTerms(input.value));
-    const pending = isSearchPending(input.value) ? ["Press Enter to apply."] : [];
+    const pending = !searchAppliesLive() && isSearchPending(input.value) ? ["Press Enter to apply."] : [];
     status.textContent = [...pending, ...problems].join(" ");
     status.hidden = !status.textContent;
 }
@@ -1114,6 +1157,29 @@ function initSearchForm(form) {
     const list = form.querySelector(".run-search-suggestions");
     let suggestions = [];
     let active = -1;
+    let liveTimer = null;
+    // Whether this stretch of typing has its own history entry yet: its first
+    // live search adds one, later ones (and the final Enter) update it, so Back
+    // returns to the previous search rather than to each pause.
+    let liveEntry = false;
+
+    const cancelLive = () => {
+        clearTimeout(liveTimer);
+        liveTimer = null;
+    };
+
+    const applyLive = () => {
+        liveTimer = null;
+        if (!input.isConnected) return;
+        const text = liveSearchText(input.value, input.selectionStart ?? input.value.length, _searchRuns);
+        _searchApplyingLive = true;
+        try {
+            if (commitSearch(text, { live: true, replace: liveEntry })) liveEntry = true;
+        } finally {
+            _searchApplyingLive = false;
+        }
+        updateSearchStatus(form);
+    };
 
     const highlight = (index) => {
         active = index;
@@ -1134,8 +1200,10 @@ function initSearchForm(form) {
     };
 
     const apply = () => {
+        cancelLive();
         closeSuggestions();
-        commitSearch(input.value);
+        commitSearch(input.value, { replace: liveEntry });
+        liveEntry = false;
         updateSearchStatus(form);
     };
 
@@ -1222,8 +1290,7 @@ function initSearchForm(form) {
             const tip = document.createElement("li");
             tip.className = "run-search-tip";
             tip.setAttribute("role", "presentation");
-            tip.textContent =
-                'Every term has to match. Quote values with spaces, as in subject:"mouse 1". Press Enter to apply.';
+            tip.textContent = `Every term has to match. Quote values with spaces, as in subject:"mouse 1".${searchAppliesLive() ? "" : " Press Enter to apply."}`;
             rows.push(tip);
         }
 
@@ -1236,10 +1303,20 @@ function initSearchForm(form) {
     input.addEventListener("input", () => {
         updateSearchStatus(form);
         openSuggestions();
+        if (searchAppliesLive()) {
+            cancelLive();
+            liveTimer = setTimeout(applyLive, SEARCH_LIVE_DELAY_MS);
+        }
     });
     input.addEventListener("focus", openSuggestions);
     input.addEventListener("click", openSuggestions);
-    input.addEventListener("blur", closeSuggestions);
+    input.addEventListener("blur", () => {
+        // Leaving the bar (e.g. to click a job card's tag) drops a pending live
+        // search, which would otherwise land on top of what the click applies.
+        cancelLive();
+        liveEntry = false;
+        closeSuggestions();
+    });
     // Keeps focus in the input when the list (an option, or its scroll bar) is
     // pressed, so it stays open.
     list.addEventListener("mousedown", (event) => event.preventDefault());
@@ -1312,10 +1389,14 @@ function renderFilterBanner(filter, availableRuns = []) {
     const applied = filterToSearchText(_searchFilter);
     if (input.dataset.applied !== applied) {
         input.dataset.applied = applied;
-        const focused = document.activeElement === input;
-        // While focused, leave room to type the next term.
-        input.value = focused && applied ? `${applied} ` : applied;
-        if (focused) input.setSelectionRange(input.value.length, input.value.length);
+        // A live search already shows as typed; anything else applied (Enter,
+        // a link, Back) replaces what the bar shows.
+        if (!_searchApplyingLive) {
+            const focused = document.activeElement === input;
+            // While focused, leave room to type the next term.
+            input.value = focused && applied ? `${applied} ` : applied;
+            if (focused) input.setSelectionRange(input.value.length, input.value.length);
+        }
     }
     updateSearchStatus(form);
     banner.style.display = "";
@@ -7308,8 +7389,9 @@ function releaseRunHydration(run) {
 }
 
 // Re-render the already-loaded queue for the filter set in the current URL,
-// reclaiming memory held for the previous scope.
-function softResetForFilterChange() {
+// reclaiming memory held for the previous scope. A `live` change (a search
+// applying as it is typed) keeps open groups and the scroll position.
+function softResetForFilterChange({ live = false } = {}) {
     const filter = parseFilter();
     _activeFilterKey = filterStateKey(filter);
 
@@ -7329,7 +7411,7 @@ function softResetForFilterChange() {
     // Collapse the tree and reset flat-layout chunking, exactly like a fresh
     // load: the old scope's materialized group bodies are reclaimed with the
     // re-render.
-    _openGroupKeys = new Set();
+    if (!live) _openGroupKeys = new Set();
     _flatRenderLimit = FLAT_RENDER_CHUNK;
 
     if (isFiltered && filteredRuns.length === 0) {
@@ -7346,7 +7428,7 @@ function softResetForFilterChange() {
         showResults();
     }
     renderFilterBanner(filter, _runsInScope);
-    window.scrollTo(0, 0);
+    if (!live) window.scrollTo(0, 0);
 
     // Restart hydration for the new scope, visible runs first (same ordering
     // as loadQueueData). Out-of-scope runs whose status a trace already
@@ -7367,14 +7449,14 @@ function softResetForFilterChange() {
 // built by narrowUrl embed the live layout/sort values, so normally only the
 // filter set differs — but popstate can restore an entry carrying older
 // layout/sort params, so those re-sync too.
-function handleInPageFilterUrlChange() {
+function handleInPageFilterUrlChange({ live = false } = {}) {
     const layoutChanged =
         _layoutMode !== parseLayoutMode() || _sortMode !== parseSortMode() || _sortDirection !== parseSortDirection();
     _layoutMode = parseLayoutMode();
     _sortMode = parseSortMode();
     _sortDirection = parseSortDirection();
     if (filterStateKey() !== _activeFilterKey) {
-        softResetForFilterChange();
+        softResetForFilterChange({ live });
     } else if (layoutChanged) {
         initLayoutToggle();
         rerenderRuns();
@@ -8205,6 +8287,7 @@ if (typeof module !== "undefined" && module.exports) {
         commitSearch,
         compareVersionsDescending,
         filterToSearchText,
+        liveSearchText,
         parseFilter,
         parseSearchTerms,
         pipelineDisplayName,
