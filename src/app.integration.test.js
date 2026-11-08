@@ -86,8 +86,10 @@ describe("app integration behavior", () => {
         expect(banner.querySelectorAll("input")).toHaveLength(1);
         const input = banner.querySelector(".run-search-input");
         expect(input.value).toBe("dandiset:001697 params:params-a config:config-a failure:pre-processing");
-        expect(banner.querySelector(".run-search-status").textContent).toBe("Showing 1 of 2 jobs.");
-        expect(banner.querySelector(".run-search-clear").hidden).toBe(false);
+        // No counts and no clear button: the line under the bar only speaks up
+        // about a search being typed.
+        expect(banner.querySelector(".run-search-status").hidden).toBe(true);
+        expect(banner.querySelector("button")).toBeNull();
 
         // A key's suggestions are the values jobs in view have, with counts.
         expect(suggest("params:")).toEqual(["params:params-a", "params:params-b"]);
@@ -263,8 +265,7 @@ describe("app integration behavior", () => {
 
         const banner = document.getElementById("filter-banner");
         expect(banner.querySelector(".run-search-input").value).toBe("status:failed");
-        expect(banner.querySelector(".run-search-status").textContent).toBe("Showing 1 of 2 jobs.");
-        expect(banner.querySelector(".run-search-summary").hidden).toBe(false);
+        expect(banner.querySelector(".run-search-status").hidden).toBe(true);
         // Status suggestions only offer statuses some job has.
         expect(suggest("status:")).toEqual(["status:failed", "status:success"]);
     });
@@ -722,15 +723,20 @@ describe("progressive queue loading", () => {
 
         await loadQueueData();
 
-        // failureStep is unknown pre-hydration, so nothing matches yet.
-        expect(document.getElementById("error").innerHTML).toContain("No pipeline runs match");
-        expect(document.getElementById("runs").style.display).toBe("none");
+        // failureStep is unknown pre-hydration, so nothing matches yet: the
+        // card area says so, without the summary or layout bar.
+        expect(document.querySelector("#runs .runs-empty").textContent).toBe("No jobs match this search.");
+        expect(document.getElementById("runs").style.display).toBe("");
+        expect(document.getElementById("summary").style.display).toBe("none");
+        expect(document.getElementById("layout-bar").style.display).toBe("none");
+        expect(document.getElementById("error").style.display).toBe("none");
 
         trace.resolve(new Response(TRACE_FAILED_PRE, { status: 200 }));
         await hydrationIdle();
 
-        expect(document.getElementById("error").style.display).toBe("none");
-        expect(document.getElementById("runs").style.display).toBe("");
+        expect(document.querySelector("#runs .runs-empty")).toBeNull();
+        expect(document.getElementById("summary").style.display).toBe("");
+        expect(document.getElementById("layout-bar").style.display).toBe("");
         expect(document.querySelector("#runs .run-entry").className).toContain("status-failed");
     });
 
@@ -747,8 +753,9 @@ describe("progressive queue loading", () => {
         trace.resolve(new Response(TRACE_FAILED_PRE, { status: 200 }));
         await hydrationIdle();
 
-        expect(document.getElementById("error").innerHTML).toContain("No pipeline runs match");
-        expect(document.getElementById("runs").style.display).toBe("none");
+        expect(document.querySelector("#runs .runs-empty").textContent).toBe("No jobs match this search.");
+        expect(document.querySelector("#runs .run-entry")).toBeNull();
+        expect(document.getElementById("summary").style.display).toBe("none");
     });
 
     it("background-hydrates only traces; detail artifacts wait for a card reveal", async () => {
@@ -1192,7 +1199,7 @@ describe("progressive queue loading", () => {
             // flight: nothing matches yet, and B's status is unsettled.
             window.history.replaceState(null, "", "/?failureStep=pre-processing");
             softResetForFilterChange();
-            expect(document.getElementById("error").innerHTML).toContain("No pipeline runs match");
+            expect(document.querySelector("#runs .runs-empty").textContent).toBe("No jobs match this search.");
 
             // B stayed in the restarted hydration queue; when its trace lands
             // it enters the filtered set via flushHydrationUpdates.
@@ -1221,7 +1228,7 @@ describe("progressive queue loading", () => {
             expect(window.location.search).toContain("dandiset=000888");
             expect(document.querySelector("#summary .stat-value").textContent).toBe("1");
             expect(document.querySelector("#summary .stat-failed .stat-value").textContent.trim()).toBe("1");
-            expect(form.querySelector(".run-search-status").textContent).toBe("Showing 1 of 2 jobs.");
+            expect(document.querySelectorAll("#runs details.dandiset-group, #runs .run-entry").length).toBe(1);
             await hydrationIdle();
 
             // Re-applying the same search (terms reordered, spacing aside) is a no-op.
@@ -1253,8 +1260,8 @@ describe("progressive queue loading", () => {
             expect(document.querySelector(".run-search-suggestions").hidden).toBe(true);
             await hydrationIdle();
 
-            // Clearing the search applies too.
-            document.querySelector(".run-search-clear").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            // Clearing the search (Esc once nothing is being typed) applies too.
+            input.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
             expect(window.location.search).not.toContain("dandiset=");
             expect(document.querySelector("#summary .stat-value").textContent).toBe("2");
             expect(input.value).toBe("");
@@ -1526,7 +1533,7 @@ describe("common issues page", () => {
         const banner = document.getElementById("filter-banner");
         expect(banner.innerHTML).toContain("Common Issues");
         // No search applied: no line under the bar.
-        expect(banner.querySelector(".run-search-summary").hidden).toBe(true);
+        expect(banner.querySelector(".run-search-status").hidden).toBe(true);
         const input = banner.querySelector(".run-search-input");
         input.value = "";
         input.dispatchEvent(new Event("input", { bubbles: true }));
@@ -1556,8 +1563,6 @@ describe("common issues page", () => {
         expect(document.getElementById("summary").querySelector(".stat-failed .stat-value").textContent).toBe("1");
         const banner = document.getElementById("filter-banner");
         expect(banner.querySelector(".run-search-input").value).toBe("failure:job-dispatch source:archive");
-        // The count follows the log scan, which settles each job's failure step.
-        expect(banner.querySelector(".run-search-status").textContent).toBe("Showing 1 of 3 failed jobs.");
         // Both sources stay on offer, though only the archive was loaded.
         const input = banner.querySelector(".run-search-input");
         input.value = "source:";
