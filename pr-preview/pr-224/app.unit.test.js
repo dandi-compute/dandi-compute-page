@@ -4996,21 +4996,24 @@ describe("live squeue monitor", () => {
         expect(screen.textContent).not.toContain("---");
         expect(screen.textContent).not.toContain("Last updated:");
 
-        // A report without its update line, or with a cell that is not a percentage, still reads.
+        // A report without its update line, without a unit on its usage, or with a cell that is not a
+        // percentage, still reads.
         const odd = document.createElement("div");
         odd.innerHTML = renderDiskMonitor(
             {
                 snapshot: {
                     ...snapshot,
-                    stdout: DISK_STDOUT.replace("Last updated: Thu Nov 05 14:28:05 EST 2026\n", "").replace(
-                        "|   0.00 |     1 |  1.1M |   0.00",
-                        "|      - |     1 |  1.1M |   0.00"
-                    ),
+                    stdout: DISK_STDOUT.replace("Last updated: Thu Nov 05 14:28:05 EST 2026\n", "")
+                        .replace("Usage (GB)", "Usage")
+                        .replace("|   0.00 |     1 |  1.1M |   0.00", "|      - |     1 |  1.1M |   0.00"),
                 },
             },
             NOW.getTime()
         );
         expect(odd.querySelectorAll(".disk-meters-caption")[1].textContent).toBe("Quota");
+        expect(odd.querySelectorAll(".disk-meter")[2].querySelector(".disk-meter-text").textContent).toBe(
+            "170.7 / 200.0"
+        );
         const pool = odd.querySelectorAll(".disk-meter")[6];
         expect(pool.className).toBe("disk-meter disk-meter-unknown");
         expect(pool.querySelector(".disk-pct")).toBeNull();
