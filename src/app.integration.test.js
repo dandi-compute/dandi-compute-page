@@ -385,6 +385,47 @@ describe("app integration behavior", () => {
         ]);
     });
 
+    it("suggests version ranges once an operator is typed, with the jobs each leaves", () => {
+        const jobCounts = {
+            "v1.2.4": 158,
+            "1.4.0": 41,
+            "1.3.3": 34,
+            "v1.2.2": 17,
+            "1.5.0": 15,
+            "v1.3.2": 8,
+            "1.2.4": 1,
+        };
+        const runs = Object.entries(jobCounts).flatMap(([pipelineVersion, count]) =>
+            Array.from({ length: count }, () => ({ pipelineName: "aind+ephys", pipelineVersion }))
+        );
+        renderFilterBanner({}, runs);
+        const counts = () => [...document.querySelectorAll(".run-search-option-count")].map((el) => el.textContent);
+
+        // Below the oldest version nothing is left, so it isn't offered; "1.2.4"
+        // makes the same comparison as "v1.2.4".
+        expect(suggest("pipeline:aind-ephys version:<")).toEqual([
+            "version:<1.5.0",
+            "version:<1.4.0",
+            "version:<1.3.3",
+            "version:<v1.3.2",
+            "version:<v1.2.4",
+        ]);
+        expect(counts()).toEqual(["259", "218", "184", "176", "17"]);
+
+        expect(suggest("version:>=1.3")).toEqual(["version:>=1.3.3", "version:>=v1.3.2"]);
+        expect(counts()).toEqual(["90", "98"]);
+
+        // An existing range narrows the next term's suggestions; an exact value doesn't.
+        expect(suggest("version:<1.4 version:")).toEqual([
+            "version:1.3.3",
+            "version:v1.3.2",
+            "version:v1.2.4",
+            "version:1.2.4",
+            "version:v1.2.2",
+        ]);
+        expect(suggest("version:1.5.0 version:")).toHaveLength(7);
+    });
+
     it("completes a key, then a value, from the keyboard", () => {
         renderFilterBanner({}, SCOPED_RUNS);
         const input = document.querySelector(".run-search-input");
