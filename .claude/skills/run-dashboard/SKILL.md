@@ -46,7 +46,8 @@ open it in Chromium, and stub the external endpoints at the network boundary.
     - `https://raw.githubusercontent.com/dandi/backup-status/main/README.md` — the DANDI Archive
       backup partitions on `?view=status`, read from the README's `## Disk Space` table
       (`| 001 | 791.56 TB / 967.57 TB (81.81%) |` rows) and its `Last update:` line.
-    - `.../code/main/src/dandi_compute_code/queue/pipeline_configs.json` — priorities banner.
+    - `.../code/main/src/dandi_compute_code/queue/pipeline_configs.json` — the queue priorities card
+      on `?view=status` (under the queue).
     - `.../code/main/...registered_params.json` / `registered_configs.json` — registries.
     - `https://dandiarchive.s3.amazonaws.com/blobs/<3>/<3>/<id>` — per-run artifacts
       (trace.txt, dataset_description.json, quality_control.json, visualization_output.json)
@@ -76,6 +77,8 @@ open it in Chromium, and stub the external endpoints at the network boundary.
 - Fulfilled ETags on cross-origin fetches aren't exposed to page JS without
   `Access-Control-Expose-Headers: ETag`, so If-None-Match assertions against
   stubs need that header (the real GitHub CDN sends it).
+- The flat layout is the default (`?layout=tree` or a stored `layoutMode` of `tree`
+  switches to the tree), and its cards are in the DOM from first paint.
 - Tree-group bodies render lazily: run cards don't exist in the DOM until their
   group chain is opened (set `.open = true` AND `dispatchEvent(new Event("toggle"))`
   per level). Wait on `details.dandiset-group`, not `.run-entry`, at first paint.
