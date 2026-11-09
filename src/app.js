@@ -3,7 +3,7 @@
    TODO: once this project migrates to TS + Vite, source this from
    package.json directly (e.g. via Vite's `define`) instead of duplicating
    it here. */
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.2.0";
 const OWNER = "dandi-compute";
 const REPO = "001697";
 const BRANCH = "draft";
