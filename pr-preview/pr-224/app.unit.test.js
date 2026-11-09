@@ -1,5 +1,13 @@
 const {
     applyFilter,
+    compareVersionsDescending,
+    liveSearchText,
+    filterToSearchText,
+    parseFilter,
+    parseSearchTerms,
+    pipelineDisplayName,
+    renderRunTags,
+    searchTermsToParams,
     buildInitialRun,
     buildRunPath,
     buildPipelineDiffPairs,
@@ -168,7 +176,12 @@ describe("app unit behavior", () => {
     });
 
     it("falls back to localStorage layout mode when URL query is absent", () => {
-        localStorage.setItem("layoutMode", "flat");
+        localStorage.setItem("layoutMode", "tree");
+        window.history.replaceState(null, "", "/");
+        expect(parseLayoutMode()).toBe("tree");
+    });
+
+    it("defaults to the flat layout", () => {
         window.history.replaceState(null, "", "/");
         expect(parseLayoutMode()).toBe("flat");
     });
@@ -2076,6 +2089,8 @@ describe("renderVisualizationSection", () => {
         expect(html).toContain("Version priority");
         expect(html).toContain("Params priority");
         expect(html).toContain("version=v1");
+        // The card is on the Status page, so its links name the dashboard.
+        expect(html).toContain("view=dashboard&amp;version=v1");
         expect(html).toContain('<span class="qp-chip-label">fast</span>');
         expect(html).not.toContain('href="?params=');
         expect(html).toContain("Max attempts per asset");
@@ -2407,6 +2422,250 @@ describe("fetchSlurmLogs", () => {
         });
         expect(result).toEqual(["job-12345_slurm.log"]);
         expect(fetchSpy).not.toHaveBeenCalled();
+    });
+});
+
+describe("search terms", () => {
+    afterEach(() => window.history.replaceState(null, "", "/"));
+
+    it("splits a search into terms at whitespace outside quotes", () => {
+        const terms = parseSearchTerms('Pipeline:lfp  subject:"mouse 1" "a:b" spikes');
+        expect(terms.map(({ key, value, raw }) => ({ key, value, raw }))).toEqual([
+            { key: "pipeline", value: "lfp", raw: "Pipeline:lfp" },
+            { key: "subject", value: "mouse 1", raw: 'subject:"mouse 1"' },
+            // A term opening with a quote is literal text, colon and all.
+            { key: null, value: "a:b", raw: '"a:b"' },
+            { key: null, value: "spikes", raw: "spikes" },
+        ]);
+        expect(terms[1]).toMatchObject({ start: 14, end: 31 });
+    });
+
+    it("maps terms onto the filter URL params, and reports terms it can't use", () => {
+        const { params, problems } = searchTermsToParams(
+            parseSearchTerms(
+                "sub:A version:v1 version:v2 size:>10 size:<100 size:big failurestep:pre-processing ses: verson:v3"
+            )
+        );
+        expect(params).toEqual({
+            subject: "A",
+            pipelineVersion: "v2",
+            assetSize: ">10, <100",
+            failureStep: "pre-processing",
+            text: "verson:v3",
+        });
+        expect(problems).toEqual([
+            "Of several exact version: values, only the last is used.",
+            "Write sizes in GB, like size:>10 or size:<=100.",
+            "There is no verson: filter, so it was searched as text. Did you mean version:?",
+        ]);
+    });
+
+    it("reads a filter set back as search text", () => {
+        expect(
+            filterToSearchText({
+                dandisetId: "000363",
+                pipeline: "aind+ephys",
+                assetSize: "> 50, < 100",
+                status: "failed",
+                text: '"sorting run" x',
+            })
+        ).toBe('dandiset:000363 pipeline:aind+ephys size:>50 size:<100 status:failed "sorting run" x');
+        expect(filterToSearchText({ subject: "mouse 1" })).toBe('subject:"mouse 1"');
+        expect(filterToSearchText({})).toBe("");
+    });
+
+    it("reads the pipeline and free-text filters from the URL", () => {
+        window.history.replaceState(null, "", "/?pipeline=lfp&q=spikes+%22sub-1%22");
+        expect(parseFilter()).toMatchObject({ pipeline: "lfp", text: 'spikes "sub-1"' });
+    });
+});
+
+describe("compareVersionsDescending", () => {
+    it("orders versions newest first by semantic version precedence, then anything else", () => {
+        const versions = [
+            "v1.2.2",
+            "abc1234",
+            "1.10.0",
+            "2.0.0-rc.1",
+            "v1",
+            "1.5.0",
+            "2.0.0",
+            "2.0.0-rc.2",
+            "2.0.0-alpha",
+        ];
+        expect([...versions].sort(compareVersionsDescending)).toEqual([
+            "2.0.0",
+            "2.0.0-rc.2",
+            "2.0.0-rc.1",
+            "2.0.0-alpha",
+            "1.10.0",
+            "1.5.0",
+            "v1.2.2",
+            "v1",
+            "abc1234",
+        ]);
+    });
+
+    it("ties versions that differ only in a v prefix or build metadata", () => {
+        expect(compareVersionsDescending("v1.2.4", "1.2.4")).toBe(0);
+        expect(compareVersionsDescending("v1.0.1+20abeb6", "1.0.1")).toBe(0);
+    });
+});
+
+describe("version ranges", () => {
+    const versions = ["1.5.0", "1.4.0", "v1.3.2", "v1.2.4", "1.2.4", "abc1234"];
+    const runs = versions.map((pipelineVersion) => ({ pipelineVersion, codebase: pipelineVersion }));
+    const matching = (filter) => applyFilter(runs, filter).map((run) => run.pipelineVersion);
+
+    it.each([
+        ["<1.5", ["1.4.0", "v1.3.2", "v1.2.4", "1.2.4"]],
+        ["<=1.4", ["1.4.0", "v1.3.2", "v1.2.4", "1.2.4"]],
+        [">v1.3.2", ["1.5.0", "1.4.0"]],
+        [">=1.3, <1.5", ["1.4.0", "v1.3.2"]],
+        ["=1.2.4", ["v1.2.4", "1.2.4"]],
+        ["1.2.4", ["1.2.4"]],
+        ["v1.2.4, <1.3", ["v1.2.4"]],
+    ])("version:%s", (expression, expected) => {
+        expect(matching({ pipelineVersion: expression })).toEqual(expected);
+        expect(matching({ dandiCodebaseVersion: expression })).toEqual(expected);
+    });
+
+    it("combines ranges, keeps the last exact value, and reports a malformed range", () => {
+        const { params, problems } = searchTermsToParams(
+            parseSearchTerms("version:>=1.3 version:1.2.4 version:<1.5 version:1.4.0 codebase:<abc")
+        );
+        expect(params).toEqual({ pipelineVersion: "1.4.0, >=1.3, <1.5" });
+        expect(problems).toEqual([
+            "Of several exact version: values, only the last is used.",
+            "Write codebase ranges like codebase:>=0.4 or codebase:<1.0.0.",
+        ]);
+    });
+
+    it("reads a range back as its terms", () => {
+        expect(filterToSearchText({ pipelineVersion: ">=1.3, <1.5" })).toBe("version:>=1.3 version:<1.5");
+    });
+
+    it("applies a range while typing once it is complete", () => {
+        expect(liveSearchText("version:<1.5", 12, runs)).toBe("version:<1.5");
+        expect(liveSearchText("version:<1.", 11, runs)).toBe("");
+        expect(liveSearchText("version:<", 9, runs)).toBe("");
+    });
+});
+
+describe("liveSearchText", () => {
+    const runs = [{ pipelineName: "aind+ephys", pipelineVersion: "1.5.0", status: "failed" }];
+
+    it.each([
+        ["keeps finished keyed terms", "pipeline:aind-ephys version:1.5.0", "pipeline:aind-ephys version:1.5.0"],
+        ["accepts a pipeline in either spelling", "pipeline:aind+ephys", "pipeline:aind+ephys"],
+        ["drops a value no job has yet", "pipeline:aind version:1.5", ""],
+        ["drops a key still awaiting its value", "status:", ""],
+        ["drops an invalid size", "size:>", ""],
+        ["keeps a valid size", "size:>1", "size:>1"],
+        ["holds a word at the caret that may become a key", "status:failed vers", "status:failed"],
+        ["applies free text that can't become a key", "status:failed 1.5", "status:failed 1.5"],
+        ["applies a key-like word once the caret has moved on", "vers status:failed", "vers status:failed"],
+    ])("%s", (_, text, expected) => {
+        expect(liveSearchText(text, text.length, runs)).toBe(expected);
+    });
+});
+
+describe("pipeline and free-text filters", () => {
+    const runs = [
+        {
+            jobId: "job-aaa",
+            dandisetId: "000363",
+            subject: "mouse1",
+            pipelineName: "aind+ephys",
+            pipelineVersion: "v1.2.4",
+            status: "success",
+        },
+        {
+            jobId: "job-bbb",
+            dandisetId: "000409",
+            subject: "mouse2",
+            pipelineName: "lfp",
+            pipelineVersion: "v0.1.0",
+            status: "failed",
+        },
+    ];
+
+    it("filters by pipeline, whichever way its name is spelled", () => {
+        expect(applyFilter(runs, { pipeline: "lfp" })).toEqual([runs[1]]);
+        expect(applyFilter(runs, { pipeline: "aind-ephys" })).toEqual([runs[0]]);
+        expect(applyFilter(runs, { pipeline: "aind+ephys" })).toEqual([runs[0]]);
+        expect(applyFilter(runs, { pipeline: "other" })).toEqual([]);
+    });
+
+    it("matches every free-text word against a job's identifying fields", () => {
+        expect(applyFilter(runs, { text: "MOUSE" })).toEqual(runs);
+        expect(applyFilter(runs, { text: "mouse 000409" })).toEqual([runs[1]]);
+        expect(applyFilter(runs, { text: "job-aaa aind-ephys" })).toEqual([runs[0]]);
+        expect(applyFilter(runs, { text: '"v0.1"' })).toEqual([runs[1]]);
+        expect(applyFilter(runs, { text: "mouse3" })).toEqual([]);
+    });
+
+    it("displays pipeline names with hyphens", () => {
+        expect(pipelineDisplayName("aind+ephys")).toBe("aind-ephys");
+        expect(pipelineDisplayName(null)).toBe("");
+    });
+});
+
+describe("job card tags", () => {
+    const run = {
+        status: "success",
+        attempt: 1,
+        tasks: [],
+        generatedBy: [],
+        logFiles: [],
+        outputPaths: {},
+        path: "derivatives/dandiset-001697/sub-A/pipeline-aind+ephys/job-1",
+        dandisetId: "001697",
+        subject: "A",
+        session: null,
+        pipelineName: "aind+ephys",
+        pipelineVersion: "v1",
+        paramsProfile: "fast",
+        configHash: "abc",
+        jobId: "job-1",
+    };
+
+    afterEach(() => window.history.replaceState(null, "", "/"));
+
+    it("tags each job card with its pipeline, in both layouts", () => {
+        for (const html of [renderFlatList([run]), renderDandisets([run])]) {
+            const container = document.createElement("div");
+            container.innerHTML = html;
+            const tag = container.querySelector(".run-entry .run-tag");
+            expect(tag).not.toBeNull();
+            expect(tag.className).toContain("run-tag-pipeline-aind-ephys");
+            expect(tag.querySelector(".run-tag-key").textContent).toBe("pipeline");
+            expect(tag.querySelector(".run-tag-value").textContent).toBe("aind-ephys");
+        }
+    });
+
+    it("links a tag to the current search with its pipeline term toggled", () => {
+        window.history.replaceState(null, "", "/?view=dashboard&layout=flat&sort=attempt&sortDir=desc&status=failed");
+        const inactive = document.createElement("div");
+        inactive.innerHTML = renderRunTags(run);
+        const href = inactive.querySelector(".run-tag").getAttribute("href");
+        expect(new URLSearchParams(href.slice(1)).get("pipeline")).toBe("aind-ephys");
+        expect(new URLSearchParams(href.slice(1)).get("status")).toBe("failed");
+        expect(inactive.querySelector(".run-tag").classList.contains("run-tag-active")).toBe(false);
+
+        window.history.replaceState(null, "", `/${href}`);
+        const active = document.createElement("div");
+        active.innerHTML = renderRunTags(run);
+        const tag = active.querySelector(".run-tag");
+        expect(tag.classList.contains("run-tag-active")).toBe(true);
+        expect(tag.getAttribute("title")).toBe("Stop filtering by pipeline:aind-ephys");
+        const offHref = new URLSearchParams(tag.getAttribute("href").slice(1));
+        expect(offHref.get("pipeline")).toBeNull();
+        expect(offHref.get("status")).toBe("failed");
+    });
+
+    it("leaves jobs without a pipeline untagged", () => {
+        expect(renderRunTags({ ...run, pipelineName: null })).toBe("");
     });
 });
 
@@ -3726,6 +3985,14 @@ describe("initLayoutToggle", () => {
         const refreshBtn = document.querySelector("[data-refresh-queue]");
         expect(refreshBtn).not.toBeNull();
         expect(refreshBtn.textContent).toMatch(/Refresh/);
+    });
+
+    it("lists the flat layout before the tree layout", () => {
+        initLayoutToggle();
+        expect([...document.querySelectorAll("[data-layout]")].map((btn) => btn.dataset.layout)).toEqual([
+            "flat",
+            "tree",
+        ]);
     });
 
     it("does not break when called multiple times", () => {
@@ -5084,7 +5351,11 @@ describe("Status page", () => {
             "Disk Usage",
         ]);
         const queue = root.querySelector("#status-queue-heading").closest(".status-section");
-        expect(queue.querySelector("#status-queue")).not.toBeNull();
+        // The queue priorities card follows the live queue.
+        expect([...queue.querySelectorAll("#status-queue, #queue-priorities")].map((d) => d.id)).toEqual([
+            "status-queue",
+            "queue-priorities",
+        ]);
         const disk = root.querySelector("#status-disk-heading").closest(".status-section");
         expect(disk.querySelector("#status-disk")).not.toBeNull();
         // Just the headings and the monitors: no notes under the headings.
