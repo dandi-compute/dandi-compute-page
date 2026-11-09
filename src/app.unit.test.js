@@ -36,9 +36,6 @@ const {
     refreshDiskMonitor,
     renderSqueueMonitor,
     renderDiskMonitor,
-    parseBackupStatus,
-    renderBackupStatus,
-    loadBackupStatus,
     renderStatusPage,
     stopMonitors,
     summarizeSqueueJobs,
@@ -4395,6 +4392,7 @@ describe("live squeue monitor", () => {
         " HOME    |      170.7 |      200.0 |  85.36 |  1.0M |  1.0M | 100.00",
         " SCRATCH |        0.0 |     1024.0 |   0.00 |     1 |  1.0M |   0.00",
         " POOL    |        0.0 |     1024.0 |   0.00 |     1 |  1.1M |   0.00",
+        "Last updated: Thu Nov 05 14:28:05 EST 2026",
         "",
     ].join("\n");
 
@@ -4916,7 +4914,7 @@ describe("live squeue monitor", () => {
         expect(monitor.querySelector(".squeue-screen").textContent).not.toContain("DANDI-Compute-Submitter");
     });
 
-    it("renders the disk snapshot as tables with the Use% column and chips coloured by how full", () => {
+    it("renders the disk snapshot's filesystems and quota as meters, with chips coloured by how full", () => {
         const snapshot = {
             branch: "monitor/2026-11-05",
             recordName: "14/20261105T143001-usage",
@@ -4939,48 +4937,88 @@ describe("live squeue monitor", () => {
             ["home 85.36%", "disk-pct disk-pct-warn", "Home directory: 170.7 of 200.0 GB"],
             ["home files 100.00%", "disk-pct disk-pct-critical", "Home directory: 1.0M of 1.0M files"],
         ]);
-        // The df table, then the quota report.
-        const tables = [...root.querySelectorAll(".squeue-screen table.disk-table")];
-        expect(tables).toHaveLength(2);
-        expect([...tables[0].querySelectorAll("thead th")].map((th) => th.textContent)).toEqual([
-            "Mounted",
-            "Size",
-            "Used",
-            "Avail",
-            "Use%",
+
+        // One grid of meters, no tables: the df filesystems, then the quota report with when it was updated.
+        const screen = root.querySelector(".squeue-screen");
+        expect(screen.querySelectorAll("table")).toHaveLength(0);
+        expect(screen.querySelectorAll(".disk-meters")).toHaveLength(1);
+        expect([...screen.querySelectorAll(".disk-meters-caption")].map((c) => c.textContent)).toEqual([
+            "Filesystems",
+            "Quotaupdated Thu Nov 05 14:28:05 EST 2026",
         ]);
-        const rows = [...tables[0].querySelectorAll("tbody tr")].map((tr) => [...tr.cells].map((td) => td.textContent));
-        expect(rows).toEqual([
-            ["/orcd/data/dandi/001", "968T", "792T", "176T", "72%"],
-            ["/orcd/data/dandi/002", "682T", "634T", "48T", "93%"],
-        ]);
+        const meters = [...screen.querySelectorAll(".disk-meter")];
         expect(
-            [...tables[0].querySelectorAll("tbody tr")].map((tr) => tr.cells[4].querySelector(".disk-pct").className)
-        ).toEqual(["disk-pct disk-pct-ok", "disk-pct disk-pct-critical"]);
-        const quota = tables[1];
-        expect(quota.classList.contains("disk-quota-table")).toBe(true);
-        expect(quota.querySelector("caption").textContent).toBe("Home directory quota");
-        expect([...quota.querySelectorAll("thead th")].map((th) => th.textContent)).toEqual([
-            "Space",
-            "Usage (GB)",
-            "Limit (GB)",
-            "% Used",
-            "Files",
-            "Limit",
-            "% Used",
+            meters.map((m) => [
+                m.querySelector(".disk-meter-label").textContent,
+                m.querySelector(".disk-meter-text").textContent,
+                m.querySelector(".disk-pct").textContent,
+                m.className,
+            ])
+        ).toEqual([
+            ["/orcd/data/dandi/001", "792T / 968T", "72%", "disk-meter disk-meter-ok"],
+            ["/orcd/data/dandi/002", "634T / 682T", "93%", "disk-meter disk-meter-critical"],
+            // A space's files sit under its space, without its name again.
+            ["HOMEspace", "170.7 / 200.0 GB", "85.36%", "disk-meter disk-meter-warn"],
+            ["files", "1.0M / 1.0M", "100.00%", "disk-meter disk-meter-critical disk-meter-continued"],
+            ["SCRATCHspace", "0.0 / 1024.0 GB", "0.00%", "disk-meter disk-meter-ok"],
+            ["files", "1 / 1.0M", "0.00%", "disk-meter disk-meter-ok disk-meter-continued"],
+            ["POOLspace", "0.0 / 1024.0 GB", "0.00%", "disk-meter disk-meter-ok"],
+            ["files", "1 / 1.1M", "0.00%", "disk-meter disk-meter-ok disk-meter-continued"],
         ]);
-        expect([...quota.querySelectorAll("tbody tr")].map((tr) => [...tr.cells].map((td) => td.textContent))).toEqual([
-            ["HOME", "170.7", "200.0", "85.36%", "1.0M", "1.0M", "100.00%"],
-            ["SCRATCH", "0.0", "1024.0", "0.00%", "1", "1.0M", "0.00%"],
-            ["POOL", "0.0", "1024.0", "0.00%", "1", "1.1M", "0.00%"],
+        // What a filesystem has left is in its tooltip.
+        expect(meters[0].title).toBe("176T available");
+        // Each bar is a meter as full as its row says.
+        const bars = meters.map((m) => m.querySelector(".disk-meter-bar"));
+        expect(bars.map((bar) => bar.getAttribute("role"))).toEqual(Array(8).fill("meter"));
+        expect(bars.map((bar) => bar.getAttribute("aria-valuenow"))).toEqual([
+            "72",
+            "93",
+            "85.36",
+            "100",
+            "0",
+            "0",
+            "0",
+            "0",
         ]);
-        const homeCells = quota.querySelector("tbody tr").cells;
-        expect([homeCells[3], homeCells[6]].map((td) => td.querySelector(".disk-pct").className)).toEqual([
-            "disk-pct disk-pct-warn",
-            "disk-pct disk-pct-critical",
+        expect(bars[3].getAttribute("aria-label")).toBe("HOME files: 100.00% used");
+        expect(bars.map((bar) => bar.querySelector(".disk-meter-fill").style.width)).toEqual([
+            "72%",
+            "93%",
+            "85.36%",
+            "100%",
+            "0%",
+            "0%",
+            "0%",
+            "0%",
         ]);
-        // The rule under the header is not a row.
-        expect(root.querySelector(".squeue-screen").textContent).not.toContain("---");
+        // Neither the report's title, its rule nor its update line shows as text.
+        expect(screen.textContent).not.toContain("QUOTA REPORT");
+        expect(screen.textContent).not.toContain("---");
+        expect(screen.textContent).not.toContain("Last updated:");
+
+        // A report without its update line, without a unit on its usage, or with a cell that is not a
+        // percentage, still reads.
+        const odd = document.createElement("div");
+        odd.innerHTML = renderDiskMonitor(
+            {
+                snapshot: {
+                    ...snapshot,
+                    stdout: DISK_STDOUT.replace("Last updated: Thu Nov 05 14:28:05 EST 2026\n", "")
+                        .replace("Usage (GB)", "Usage")
+                        .replace("|   0.00 |     1 |  1.1M |   0.00", "|      - |     1 |  1.1M |   0.00"),
+                },
+            },
+            NOW.getTime()
+        );
+        expect(odd.querySelectorAll(".disk-meters-caption")[1].textContent).toBe("Quota");
+        expect(odd.querySelectorAll(".disk-meter")[2].querySelector(".disk-meter-text").textContent).toBe(
+            "170.7 / 200.0"
+        );
+        const pool = odd.querySelectorAll(".disk-meter")[6];
+        expect(pool.className).toBe("disk-meter disk-meter-unknown");
+        expect(pool.querySelector(".disk-pct")).toBeNull();
+        expect(pool.querySelector(".disk-meter-bar").getAttribute("role")).toBeNull();
+        expect(pool.querySelector(".disk-meter-fill")).toBeNull();
 
         // Without a quota report (~/orcd/.quota missing), the du line stands in for it, without home chips.
         const fallback = document.createElement("div");
@@ -4992,7 +5030,9 @@ describe("live squeue monitor", () => {
             "/orcd/data/dandi/001 72%",
             "/orcd/data/dandi/002 93%",
         ]);
-        const duTable = fallback.querySelectorAll(".squeue-screen table.disk-table")[1];
+        // The filesystems stay meters; the du line is a table after them.
+        expect(fallback.querySelectorAll(".squeue-screen .disk-meter")).toHaveLength(2);
+        const duTable = fallback.querySelector(".squeue-screen .disk-meters + table.disk-table");
         expect([...duTable.querySelectorAll("thead th")].map((th) => th.textContent)).toEqual(["Used", "Path"]);
         expect([...duTable.querySelectorAll("tbody td")].map((td) => td.textContent)).toEqual(["142G", "/home/cb239"]);
 
@@ -5305,129 +5345,14 @@ describe("common issues extraction", () => {
     });
 });
 
-describe("DANDI backup partitions and the Status page", () => {
-    const README = [
-        "# DANDI Backup Status",
-        "",
-        "Current status of S3 bucket backup of the DANDI Archive.",
-        "",
-        "Last update: November 2, 2026 at 06:09 AM ET",
-        "",
-        "## Disk Space",
-        "",
-        "|   Partition | Size (Used / Total)            |",
-        "| ----------: | :----------------------------- |",
-        "|         001 | 791.56 TB / 967.57 TB (81.81%) |",
-        "|         002 | 416.05 TB / 681.70 TB (61.03%) |",
-        "",
-        "## Content",
-        "",
-        "| Location      | Size (Local / Remote)           |",
-        "| :------------ | :------------------------------ |",
-        "| blobs/        | 1.21 PB / 1.28 PB (94.23%)      |",
-        "",
-    ].join("\n");
-    let originalFetch;
-
-    beforeEach(() => {
-        originalFetch = global.fetch;
-    });
-
-    afterEach(() => {
-        global.fetch = originalFetch;
-        stopMonitors();
-        document.body.innerHTML = "";
-    });
-
-    it("reads the partitions and the update time from the README's Disk Space table only", () => {
-        expect(parseBackupStatus(README)).toEqual({
-            updated: "November 2, 2026 at 06:09 AM ET",
-            partitions: [
-                { name: "001", used: "791.56 TB", total: "967.57 TB", percent: 81.81 },
-                { name: "002", used: "416.05 TB", total: "681.70 TB", percent: 61.03 },
-            ],
-        });
-        expect(parseBackupStatus("# Nothing here\n")).toEqual({ updated: null, partitions: [] });
-        expect(parseBackupStatus(undefined)).toEqual({ updated: null, partitions: [] });
-        // A Disk Space section that ends the file still parses.
-        const last = README.slice(0, README.indexOf("## Content"));
-        expect(parseBackupStatus(last).partitions).toHaveLength(2);
-    });
-
-    it("renders the partitions as meters coloured by how full they are, with the sizes beside them", () => {
-        const root = document.createElement("div");
-        root.innerHTML = renderBackupStatus({
-            status: {
-                updated: "November 2, 2026 at 06:09 AM ET",
-                partitions: [
-                    { name: "001", used: "791.56 TB", total: "967.57 TB", percent: 81.81 },
-                    { name: "002", used: "416.05 TB", total: "681.70 TB", percent: 61.03 },
-                    { name: "003", used: "9 TB", total: "9 TB", percent: 100 },
-                ],
-            },
-        });
-        expect(root.querySelector(".backup-status-updated").textContent).toBe(
-            "Last update: November 2, 2026 at 06:09 AM ET"
-        );
-        expect(root.querySelector(".backup-status-source a").href).toBe("https://github.com/dandi/backup-status");
-        const meters = [...root.querySelectorAll(".disk-meter")];
-        expect(meters.map((m) => m.className)).toEqual([
-            "disk-meter disk-meter-warn",
-            "disk-meter disk-meter-ok",
-            "disk-meter disk-meter-critical",
-        ]);
-        expect(meters.map((m) => m.getAttribute("aria-valuenow"))).toEqual(["81.81", "61.03", "100"]);
-        expect(meters.map((m) => m.querySelector(".disk-meter-fill").style.width)).toEqual([
-            "81.81%",
-            "61.03%",
-            "100%",
-        ]);
-        expect(meters.map((m) => m.querySelector(".disk-meter-text").textContent)).toEqual([
-            "791.56 TB / 967.57 TB",
-            "416.05 TB / 681.70 TB",
-            "9 TB / 9 TB",
-        ]);
-        expect(meters.map((m) => m.querySelector(".disk-pct").textContent)).toEqual(["81.81%", "61.03%", "100%"]);
-
-        const loading = document.createElement("div");
-        loading.innerHTML = renderBackupStatus();
-        expect(loading.querySelector(".backup-status-note").textContent).toBe("Loading…");
-        const failed = document.createElement("div");
-        failed.innerHTML = renderBackupStatus({ error: "Could not load <it>" });
-        expect(failed.querySelector(".backup-status-error").textContent).toBe("Could not load <it>");
-        const empty = document.createElement("div");
-        empty.innerHTML = renderBackupStatus({ status: { updated: null, partitions: [] } });
-        expect(empty.querySelector(".backup-status-note").textContent).toBe("No Disk Space table found in the README.");
-        expect(empty.querySelector(".backup-status-updated")).toBeNull();
-    });
-
-    it("loads the README from the repository's main branch and shows a failure in place", async () => {
-        const el = document.createElement("div");
-        global.fetch = vi.fn(async () => new Response(README, { status: 200 }));
-        await loadBackupStatus(el);
-        expect(global.fetch).toHaveBeenCalledWith(
-            "https://raw.githubusercontent.com/dandi/backup-status/main/README.md"
-        );
-        expect(el.querySelectorAll(".disk-meter")).toHaveLength(2);
-
-        global.fetch = vi.fn(async () => new Response("", { status: 503 }));
-        await loadBackupStatus(el);
-        expect(el.querySelector(".backup-status-error").textContent).toBe(
-            "Could not load dandi/backup-status: HTTP 503"
-        );
-
-        global.fetch = vi.fn().mockRejectedValue(new TypeError("Failed to fetch"));
-        await loadBackupStatus(el);
-        expect(el.querySelector(".backup-status-error").textContent).toBe(
-            "Could not load dandi/backup-status: Failed to fetch"
-        );
-        await expect(loadBackupStatus(null)).resolves.toBeUndefined();
-    });
-
+describe("Status page", () => {
     it("lays the Status page out as a queue section and a disk section with their containers", () => {
         const root = document.createElement("div");
         root.innerHTML = renderStatusPage();
-        expect([...root.querySelectorAll(".status-heading")].map((h) => h.textContent)).toEqual(["Queue", "Disk"]);
+        expect([...root.querySelectorAll(".status-heading")].map((h) => h.textContent)).toEqual([
+            "SLURM Queue",
+            "Disk Usage",
+        ]);
         const queue = root.querySelector("#status-queue-heading").closest(".status-section");
         // The queue priorities card follows the live queue.
         expect([...queue.querySelectorAll("#status-queue, #queue-priorities")].map((d) => d.id)).toEqual([
@@ -5435,10 +5360,8 @@ describe("DANDI backup partitions and the Status page", () => {
             "queue-priorities",
         ]);
         const disk = root.querySelector("#status-disk-heading").closest(".status-section");
-        // The backup partitions come before the cluster's own disk snapshot.
-        expect([...disk.querySelectorAll("#backup-status, #status-disk")].map((d) => d.id)).toEqual([
-            "backup-status",
-            "status-disk",
-        ]);
+        expect(disk.querySelector("#status-disk")).not.toBeNull();
+        // Just the headings and the monitors: no notes under the headings.
+        expect(root.querySelectorAll("p")).toHaveLength(0);
     });
 });

@@ -3,7 +3,7 @@
    TODO: once this project migrates to TS + Vite, source this from
    package.json directly (e.g. via Vite's `define`) instead of duplicating
    it here. */
-const APP_VERSION = "1.1.0";
+const APP_VERSION = "1.2.0";
 const OWNER = "dandi-compute";
 const REPO = "001697";
 const BRANCH = "draft";
@@ -2858,11 +2858,6 @@ const DISK_STALE_AFTER_MS = 90 * 60 * 1000;
 // A filesystem this full is a warning; this full, a problem.
 const DISK_WARN_PERCENT = 80;
 const DISK_CRITICAL_PERCENT = 90;
-/* dandi/backup-status reports how full the DANDI Archive backup partitions on
-   MIT Engaging are, in its README (rewritten daily by the backup's
-   update_dashboard job). The Status page shows its Disk Space table. */
-const BACKUP_STATUS_REPO_URL = "https://github.com/dandi/backup-status";
-const BACKUP_STATUS_README_URL = "https://raw.githubusercontent.com/dandi/backup-status/main/README.md";
 // Always-on infrastructure jobs (the queue submitter, launcher/launch_submitter.sh
 // in dandi-compute-runner) that the dashboard leaves out of the snapshot so it
 // shows pipeline runs only. The Status page (?view=status) shows every job.
@@ -3268,14 +3263,14 @@ function renderUsePercent(cell) {
 }
 
 // ORCD's quota report (~/orcd/.quota, shown at login): a "QUOTA REPORT" title,
-// a header of seven "|"-separated cells, a dashed rule, then one row per space
-// (HOME, SCRATCH, POOL) with its usage, limit and % used in GB, then in files.
-// { header, rows: [{ space, cells }] }, where `cells` are the row's seven
-// cells; null when `text` is not such a report. Read line by line, without
-// regexes that could backtrack.
+// a header of seven "|"-separated cells, a dashed rule, one row per space
+// (HOME, SCRATCH, POOL) with its usage, limit and % used in GB, then in files,
+// and a "Last updated: ..." line. { header, rows: [{ space, cells }], updated },
+// where `cells` are the row's seven cells and `updated` the time after "Last
+// updated:" (null without that line); null when `text` is not such a report.
+// Read line by line, without regexes that could backtrack.
 const QUOTA_REPORT_COLUMNS = 7;
-const QUOTA_SPACE_PERCENT_COLUMN = 3;
-const QUOTA_FILES_PERCENT_COLUMN = 6;
+const QUOTA_UPDATED_PREFIX = "Last updated:";
 const splitQuotaCells = (line) => line.split("|").map((cell) => cell.trim());
 function parseQuotaReport(text) {
     const lines = String(text ?? "")
@@ -3287,14 +3282,19 @@ function parseQuotaReport(text) {
     const header = splitQuotaCells(lines[headerIndex]);
     if (header.length !== QUOTA_REPORT_COLUMNS) return null;
     const rows = [];
+    let updated = null;
     for (const line of lines.slice(headerIndex + 1)) {
         // The rule under the header, e.g. "---------+--------".
         if (line.replace(/[-+]/g, "") === "") continue;
+        if (line.startsWith(QUOTA_UPDATED_PREFIX)) {
+            updated = line.slice(QUOTA_UPDATED_PREFIX.length).trim() || null;
+            continue;
+        }
         const cells = splitQuotaCells(line);
         if (cells.length !== QUOTA_REPORT_COLUMNS) return null;
         rows.push({ space: cells[0], cells });
     }
-    return rows.length > 0 ? { header, rows } : null;
+    return rows.length > 0 ? { header, rows, updated } : null;
 }
 
 // A quota report's "% Used" cell ("70.36") as a percentage; null when it is not a number.
@@ -3302,62 +3302,125 @@ function parseQuotaPercent(cell) {
     return parseUsePercent(`${cell}%`);
 }
 
-// The quota report as a table, its two "% Used" columns coloured by how full.
-function renderQuotaTable({ header, rows }) {
-    const percentColumns = new Set([QUOTA_SPACE_PERCENT_COLUMN, QUOTA_FILES_PERCENT_COLUMN]);
-    const numeric = (index) => (index > 0 ? ' class="squeue-num"' : "");
-    const head = header.map((label, index) => `<th scope="col"${numeric(index)}>${e(label)}</th>`).join("");
-    const body = rows
-        .map(({ cells }) => {
-            const tds = cells.map((cell, index) => {
-                const content =
-                    percentColumns.has(index) && parseQuotaPercent(cell) !== null
-                        ? renderUsePercent(`${cell}%`)
-                        : e(cell);
-                return `<td${numeric(index)}>${content}</td>`;
-            });
-            return `<tr>${tds.join("")}</tr>`;
-        })
-        .join("");
-    return `<table class="squeue-table disk-table disk-quota-table"><caption>Home directory quota</caption><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+// One row of the disk meters: the name (and, for a quota, "space" or "files"),
+// a bar as full as `percentCell` ("70.36%") says, the usage as text and the
+// percentage, coloured by how full. A `continued` row carries on the space
+// above it (its files under its space), so its name is left blank.
+function renderDiskMeter({ name, kind = null, continued = false, percentCell, text, title = null }) {
+    const percent = parseUsePercent(percentCell);
+    const usage = diskUsageKind(percent);
+    const label = kind
+        ? `<span class="disk-meter-name">${continued ? "" : e(name)}</span><span class="disk-meter-kind">${e(kind)}</span>`
+        : `<span class="disk-meter-name disk-meter-name-wide">${e(name)}</span>`;
+    const fill =
+        percent === null
+            ? ""
+            : `<span class="disk-meter-fill" style="width: ${Math.max(0, Math.min(100, percent))}%"></span>`;
+    const meter =
+        percent === null
+            ? ""
+            : ` role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${e(percent)}" aria-label="${e(kind ? `${name} ${kind}` : name)}: ${e(percentCell)} used"`;
+    return `<div class="disk-meter disk-meter-${usage}${continued ? " disk-meter-continued" : ""}"${title ? ` title="${e(title)}"` : ""}><span class="disk-meter-label">${label}</span><span class="disk-meter-bar"${meter}>${fill}</span><span class="disk-meter-text">${e(text)}</span>${renderUsePercent(percentCell)}</div>`;
 }
 
-// The disk snapshot's screen: each blank-line-separated block of its output as
-// a table (the df table, then the home directory's quota report, or the du
-// line when there was no report), with the Use% and % Used columns coloured by
-// how full, or as plain text when it does not parse as one.
+// The title row above a group of meters, with a note (e.g. when it was updated) at its right.
+const renderDiskMetersCaption = (title, note = null) =>
+    `<div class="disk-meters-caption"><span>${e(title)}</span>${note ? `<span class="disk-meters-note">${e(note)}</span>` : ""}</div>`;
+
+// The df table's filesystems as meters: the mount point, then used / size,
+// with what is left in the tooltip. Null when the table lacks those columns
+// or has no rows.
+function renderDfMeters({ columns, rows }) {
+    const column = (label) => columns.findIndex((c) => c.label === label);
+    const [mount, size, used, avail, pcent] = ["Mounted", "Size", "Used", "Avail", "Use%"].map(column);
+    if ([mount, size, used, pcent].some((index) => index < 0) || rows.length === 0) return null;
+    const meters = rows.map((row) =>
+        renderDiskMeter({
+            name: row[mount],
+            percentCell: row[pcent],
+            text: `${row[used]} / ${row[size]}`,
+            title: avail >= 0 ? `${row[avail]} available` : null,
+        })
+    );
+    return renderDiskMetersCaption("Filesystems") + meters.join("");
+}
+
+// The quota report as meters: per space, one for its space and one for its
+// number of files, with when ORCD last updated the report.
+function renderQuotaMeters({ header, rows, updated }) {
+    // "Usage (GB)" → "GB".
+    const unitStart = header[1].indexOf("(");
+    const unit = unitStart >= 0 && header[1].endsWith(")") ? header[1].slice(unitStart + 1, -1) : "";
+    const percentCell = (cell) => (parseQuotaPercent(cell) === null ? cell : `${cell}%`);
+    const meters = rows.map(({ space, cells }) => {
+        const [, used, limit, spacePercent, files, filesLimit, filesPercent] = cells;
+        return (
+            renderDiskMeter({
+                name: space,
+                kind: "space",
+                percentCell: percentCell(spacePercent),
+                text: `${used} / ${limit}${unit ? ` ${unit}` : ""}`,
+            }) +
+            renderDiskMeter({
+                name: space,
+                kind: "files",
+                continued: true,
+                percentCell: percentCell(filesPercent),
+                text: `${files} / ${filesLimit}`,
+            })
+        );
+    });
+    return renderDiskMetersCaption("Quota", updated ? `updated ${updated}` : null) + meters.join("");
+}
+
+// A table of the disk snapshot (the du line when there was no quota report),
+// its Use% column coloured by how full.
+function renderDiskTable({ columns, rows }) {
+    const percentColumn = columns.findIndex(({ label }) => label === "Use%");
+    const numeric = (column) => (column.right ? ' class="squeue-num"' : "");
+    const head = columns.map((column) => `<th scope="col"${numeric(column)}>${e(column.label)}</th>`).join("");
+    const body = rows
+        .map((row) => {
+            const cells = row.map((cell, index) => {
+                const content = index === percentColumn ? renderUsePercent(cell) : e(cell);
+                return `<td${numeric(columns[index])}>${content}</td>`;
+            });
+            return `<tr>${cells.join("")}</tr>`;
+        })
+        .join("");
+    return `<table class="squeue-table disk-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+// The disk snapshot's screen, from each blank-line-separated block of its
+// output: the df table's filesystems and the quota report as meters (one grid,
+// so their bars line up), any other table (the du line when there was no
+// quota report) as a table, and anything else as plain text.
 function renderDiskOutput(snapshot) {
     let html = "";
+    let meters = "";
+    const flushMeters = () => {
+        if (meters) html += `<div class="disk-meters">${meters}</div>`;
+        meters = "";
+    };
     const stdout = squeueScreenText(snapshot.stdout);
     const blocks = stdout ? stdout.split(/\n{2,}/) : [];
     for (const block of blocks) {
         const quota = parseQuotaReport(block);
         if (quota) {
-            html += renderQuotaTable(quota);
+            meters += renderQuotaMeters(quota);
             continue;
         }
         // A lone line (an error message) is text, not a header without rows.
         const table = block.includes("\n") ? parseSqueueTable(block) : null;
-        if (!table) {
-            html += `<pre class="squeue-text">${e(block)}</pre>`;
+        const dfMeters = table ? renderDfMeters(table) : null;
+        if (dfMeters) {
+            meters += dfMeters;
             continue;
         }
-        const percentColumn = table.columns.findIndex(({ label }) => label === "Use%");
-        const numeric = (column) => (column.right ? ' class="squeue-num"' : "");
-        const head = table.columns
-            .map((column) => `<th scope="col"${numeric(column)}>${e(column.label)}</th>`)
-            .join("");
-        const body = table.rows
-            .map((row) => {
-                const cells = row.map((cell, index) => {
-                    const content = index === percentColumn ? renderUsePercent(cell) : e(cell);
-                    return `<td${numeric(table.columns[index])}>${content}</td>`;
-                });
-                return `<tr>${cells.join("")}</tr>`;
-            })
-            .join("");
-        html += `<table class="squeue-table disk-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+        flushMeters();
+        html += table ? renderDiskTable(table) : `<pre class="squeue-text">${e(block)}</pre>`;
     }
+    flushMeters();
     const messages = [];
     const stderr = squeueScreenText(snapshot.stderr);
     if (stderr) messages.push(e(stderr));
@@ -3523,101 +3586,17 @@ function stopMonitors() {
     _newestMonitorBranch.clear();
 }
 
-/* ─── DANDI Archive backup partitions (the Status page) ─────── */
-
-// The backup-status README's "Last update" line and Disk Space table:
-// { updated, partitions: [{ name, used, total, percent }] }. Partitions are
-// empty when the README has no such table. Read line by line: the README is
-// fetched from another repository, so nothing here backtracks on its input.
-const BACKUP_SIZE_CELL_PATTERN = /^(\d[\d.]* [A-Za-z]+) \/ (\d[\d.]* [A-Za-z]+) \((\d+(?:\.\d+)?)%\)$/;
-function parseBackupStatus(markdown) {
-    let updated = null;
-    const partitions = [];
-    let inDiskSpace = false;
-    for (const rawLine of String(markdown ?? "").split("\n")) {
-        const line = rawLine.trim();
-        if (updated === null && line.startsWith("Last update:")) {
-            updated = line.slice("Last update:".length).trim() || null;
-            continue;
-        }
-        if (line.startsWith("#")) {
-            inDiskSpace = line.replace(/\s+/g, " ") === "## Disk Space";
-            continue;
-        }
-        if (!inDiskSpace || !line.startsWith("|")) continue;
-        const cells = line.split("|").map((cell) => cell.trim());
-        // "| 001 | 791.56 TB / 967.57 TB (81.81%) |" splits into "", name, sizes, "".
-        const sizes = BACKUP_SIZE_CELL_PATTERN.exec(cells[2] ?? "");
-        if (!cells[1] || !sizes) continue;
-        partitions.push({ name: cells[1], used: sizes[1], total: sizes[2], percent: Number(sizes[3]) });
-    }
-    return { updated, partitions };
-}
-
-// The partitions as meters: the name, a bar as full as the partition, and
-// the used / total sizes with the percentage, coloured like the disk snapshot.
-function renderBackupStatus({ status = undefined, error = null } = {}) {
-    const title = `<a href="${BACKUP_STATUS_REPO_URL}" target="_blank" rel="noopener">dandi/backup-status</a>`;
-    let body;
-    if (error) {
-        body = `<p class="backup-status-note backup-status-error">${e(error)}</p>`;
-    } else if (status === undefined) {
-        body = `<p class="backup-status-note">Loading…</p>`;
-    } else if (status.partitions.length === 0) {
-        body = `<p class="backup-status-note">No Disk Space table found in the README.</p>`;
-    } else {
-        body = status.partitions
-            .map(({ name, used, total, percent }) => {
-                const kind = diskUsageKind(percent);
-                const width = Math.max(0, Math.min(100, percent));
-                return `
-<div class="disk-meter disk-meter-${kind}" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${e(percent)}" aria-label="Partition ${e(name)}: ${e(percent)}% full">
-    <span class="disk-meter-name">${e(name)}</span>
-    <span class="disk-meter-bar"><span class="disk-meter-fill" style="width: ${width}%"></span></span>
-    <span class="disk-meter-text">${e(used)} / ${e(total)}</span>
-    <span class="disk-pct disk-pct-${kind}">${e(percent)}%</span>
-</div>`;
-            })
-            .join("");
-    }
-    const updated = status?.updated
-        ? `<span class="backup-status-updated">Last update: ${e(status.updated)}</span>`
-        : "";
-    return `
-<div class="backup-status-head">
-    <span class="backup-status-title">DANDI Archive backup partitions</span>
-    <span class="backup-status-source">${updated} ${title} ↗</span>
-</div>
-${body}`;
-}
-
-// Fetch the README once and draw the partitions into `el`. Resolves when drawn.
-async function loadBackupStatus(el) {
-    if (!el) return;
-    el.innerHTML = renderBackupStatus();
-    try {
-        const resp = await fetch(BACKUP_STATUS_README_URL);
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        el.innerHTML = renderBackupStatus({ status: parseBackupStatus(await resp.text()) });
-    } catch (err) {
-        el.innerHTML = renderBackupStatus({ error: `Could not load dandi/backup-status: ${err.message || err}` });
-    }
-}
-
 /* ─── Status page ───────────────────────────────────────────── */
 function renderStatusPage() {
     return `
 <div class="status-page">
     <section class="status-section" aria-labelledby="status-queue-heading">
-        <h2 class="status-heading" id="status-queue-heading">Queue</h2>
-        <p class="status-note">Every DANDI Compute job on MIT Engaging, including the always-on queue submitter, as of the latest <code>squeue</code> snapshot (taken every 5 minutes), then the priorities the queue submits new jobs by.</p>
+        <h2 class="status-heading" id="status-queue-heading">SLURM Queue</h2>
         <div id="status-queue"></div>
         <div id="queue-priorities" class="queue-priorities" style="display: none"></div>
     </section>
     <section class="status-section" aria-labelledby="status-disk-heading">
-        <h2 class="status-heading" id="status-disk-heading">Disk</h2>
-        <p class="status-note">How full the DANDI project filesystems are, and the home directory's quota on space and on the number of files (ORCD's report in <code>~/orcd/.quota</code>, as shown at login), as of the latest disk snapshot (taken every 30 minutes), after the DANDI Archive backup partitions as dandi/backup-status reports them daily.</p>
-        <div id="backup-status" class="backup-status"></div>
+        <h2 class="status-heading" id="status-disk-heading">Disk Usage</h2>
         <div id="status-disk"></div>
     </section>
 </div>`;
@@ -8291,7 +8270,7 @@ async function init() {
     if (_viewMode === "status") {
         setPageCopy(
             "Cluster Status",
-            `The queue and the disks on MIT Engaging, from the snapshots the runner records to <a href="${GLOBAL_LOGS_REPO_URL}" target="_blank" rel="noopener">dandi-compute-global-logs</a> and from <a href="${BACKUP_STATUS_REPO_URL}" target="_blank" rel="noopener">dandi/backup-status</a>.`
+            `The SLURM queue and disk usage on MIT Engaging, from the snapshots the runner records to <a href="${GLOBAL_LOGS_REPO_URL}" target="_blank" rel="noopener">dandi-compute-global-logs</a>.`
         );
         // Nothing else to load: the monitors are the page.
         document.getElementById("runs").innerHTML = renderStatusPage();
@@ -8299,7 +8278,6 @@ async function init() {
         initSqueueMonitor({ container: document.getElementById("status-queue") });
         initQueuePriorities();
         initDiskMonitor({ container: document.getElementById("status-disk") });
-        loadBackupStatus(document.getElementById("backup-status"));
         return;
     }
     if (_viewMode === "archive") {
@@ -8426,9 +8404,6 @@ if (typeof module !== "undefined" && module.exports) {
         refreshDiskMonitor,
         renderSqueueMonitor,
         renderDiskMonitor,
-        parseBackupStatus,
-        renderBackupStatus,
-        loadBackupStatus,
         renderStatusPage,
         stopMonitors,
         summarizeSqueueJobs,
