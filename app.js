@@ -3,7 +3,7 @@
    TODO: once this project migrates to TS + Vite, source this from
    package.json directly (e.g. via Vite's `define`) instead of duplicating
    it here. */
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.0";
 const OWNER = "dandi-compute";
 const REPO = "001697";
 const BRANCH = "draft";
@@ -3345,14 +3345,20 @@ function renderDfMeters({ columns, rows }) {
     return renderDiskMetersCaption("Filesystems") + meters.join("");
 }
 
-// The quota report as meters: per space, one for its space and one for its
-// number of files, with when ORCD last updated the report.
+// DANDI Compute keeps nothing in these spaces, so their meters would only be noise.
+const QUOTA_HIDDEN_SPACES = new Set(["SCRATCH", "POOL"]);
+
+// The quota report as meters: per space not hidden, one for its space and one
+// for its number of files, with when ORCD last updated the report. Empty when
+// every space is hidden.
 function renderQuotaMeters({ header, rows, updated }) {
+    const shownRows = rows.filter(({ space }) => !QUOTA_HIDDEN_SPACES.has(space));
+    if (shownRows.length === 0) return "";
     // "Usage (GB)" → "GB".
     const unitStart = header[1].indexOf("(");
     const unit = unitStart >= 0 && header[1].endsWith(")") ? header[1].slice(unitStart + 1, -1) : "";
     const percentCell = (cell) => (parseQuotaPercent(cell) === null ? cell : `${cell}%`);
-    const meters = rows.map(({ space, cells }) => {
+    const meters = shownRows.map(({ space, cells }) => {
         const [, used, limit, spacePercent, files, filesLimit, filesPercent] = cells;
         return (
             renderDiskMeter({

@@ -4960,41 +4960,26 @@ describe("live squeue monitor", () => {
             // A space's files sit under its space, without its name again.
             ["HOMEspace", "170.7 / 200.0 GB", "85.36%", "disk-meter disk-meter-warn"],
             ["files", "1.0M / 1.0M", "100.00%", "disk-meter disk-meter-critical disk-meter-continued"],
-            ["SCRATCHspace", "0.0 / 1024.0 GB", "0.00%", "disk-meter disk-meter-ok"],
-            ["files", "1 / 1.0M", "0.00%", "disk-meter disk-meter-ok disk-meter-continued"],
-            ["POOLspace", "0.0 / 1024.0 GB", "0.00%", "disk-meter disk-meter-ok"],
-            ["files", "1 / 1.1M", "0.00%", "disk-meter disk-meter-ok disk-meter-continued"],
         ]);
         // What a filesystem has left is in its tooltip.
         expect(meters[0].title).toBe("176T available");
         // Each bar is a meter as full as its row says.
         const bars = meters.map((m) => m.querySelector(".disk-meter-bar"));
-        expect(bars.map((bar) => bar.getAttribute("role"))).toEqual(Array(8).fill("meter"));
-        expect(bars.map((bar) => bar.getAttribute("aria-valuenow"))).toEqual([
-            "72",
-            "93",
-            "85.36",
-            "100",
-            "0",
-            "0",
-            "0",
-            "0",
-        ]);
+        expect(bars.map((bar) => bar.getAttribute("role"))).toEqual(Array(4).fill("meter"));
+        expect(bars.map((bar) => bar.getAttribute("aria-valuenow"))).toEqual(["72", "93", "85.36", "100"]);
         expect(bars[3].getAttribute("aria-label")).toBe("HOME files: 100.00% used");
         expect(bars.map((bar) => bar.querySelector(".disk-meter-fill").style.width)).toEqual([
             "72%",
             "93%",
             "85.36%",
             "100%",
-            "0%",
-            "0%",
-            "0%",
-            "0%",
         ]);
-        // Neither the report's title, its rule nor its update line shows as text.
+        // Neither the report's title, its rule, its update line nor the unused SCRATCH and POOL spaces show.
         expect(screen.textContent).not.toContain("QUOTA REPORT");
         expect(screen.textContent).not.toContain("---");
         expect(screen.textContent).not.toContain("Last updated:");
+        expect(screen.textContent).not.toContain("SCRATCH");
+        expect(screen.textContent).not.toContain("POOL");
 
         // A report without its update line, without a unit on its usage, or with a cell that is not a
         // percentage, still reads.
@@ -5005,20 +4990,29 @@ describe("live squeue monitor", () => {
                     ...snapshot,
                     stdout: DISK_STDOUT.replace("Last updated: Thu Nov 05 14:28:05 EST 2026\n", "")
                         .replace("Usage (GB)", "Usage")
-                        .replace("|   0.00 |     1 |  1.1M |   0.00", "|      - |     1 |  1.1M |   0.00"),
+                        .replace("|  85.36 |  1.0M |  1.0M | 100.00", "|      - |  1.0M |  1.0M | 100.00"),
                 },
             },
             NOW.getTime()
         );
         expect(odd.querySelectorAll(".disk-meters-caption")[1].textContent).toBe("Quota");
-        expect(odd.querySelectorAll(".disk-meter")[2].querySelector(".disk-meter-text").textContent).toBe(
-            "170.7 / 200.0"
+        const homeSpace = odd.querySelectorAll(".disk-meter")[2];
+        expect(homeSpace.querySelector(".disk-meter-text").textContent).toBe("170.7 / 200.0");
+        expect(homeSpace.className).toBe("disk-meter disk-meter-unknown");
+        expect(homeSpace.querySelector(".disk-pct")).toBeNull();
+        expect(homeSpace.querySelector(".disk-meter-bar").getAttribute("role")).toBeNull();
+        expect(homeSpace.querySelector(".disk-meter-fill")).toBeNull();
+
+        // A report of only SCRATCH and POOL draws no quota meters, not even their caption.
+        const hiddenOnly = document.createElement("div");
+        hiddenOnly.innerHTML = renderDiskMonitor(
+            { snapshot: { ...snapshot, stdout: DISK_STDOUT.replace(/^ HOME .*\n/m, "") } },
+            NOW.getTime()
         );
-        const pool = odd.querySelectorAll(".disk-meter")[6];
-        expect(pool.className).toBe("disk-meter disk-meter-unknown");
-        expect(pool.querySelector(".disk-pct")).toBeNull();
-        expect(pool.querySelector(".disk-meter-bar").getAttribute("role")).toBeNull();
-        expect(pool.querySelector(".disk-meter-fill")).toBeNull();
+        expect([...hiddenOnly.querySelectorAll(".disk-meters-caption")].map((c) => c.textContent)).toEqual([
+            "Filesystems",
+        ]);
+        expect(hiddenOnly.querySelectorAll(".squeue-screen .disk-meter")).toHaveLength(2);
 
         // Without a quota report (~/orcd/.quota missing), the du line stands in for it, without home chips.
         const fallback = document.createElement("div");
