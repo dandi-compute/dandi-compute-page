@@ -413,7 +413,7 @@ function applyFilter(runs, filter) {
         if (filter.session && r.session !== filter.session) return false;
         if (filter.pipeline && pipelineDisplayName(r.pipelineName) !== pipelineDisplayName(filter.pipeline))
             return false;
-        if (filter.pipelineVersion && r.pipelineVersion !== filter.pipelineVersion) return false;
+        if (filter.pipelineVersion && !matchesVersionFilter(r.pipelineVersion, filter.pipelineVersion)) return false;
         if (filter.text && !matchesSearchText(r, filter.text)) return false;
         // Only Common Issues runs carry a source (the queue they were read from).
         if (filter.source && r.source && r.source !== filter.source) return false;
@@ -424,7 +424,7 @@ function applyFilter(runs, filter) {
         if (filter.configType && !matchesResolvedOrRawValue(filter.configType, runConfigType(r), r.configHash))
             return false;
         if (filter.dandiCodebaseHash && runDandiCodebaseHash(r) !== filter.dandiCodebaseHash) return false;
-        if (filter.dandiCodebaseVersion && r.codebase !== filter.dandiCodebaseVersion) return false;
+        if (filter.dandiCodebaseVersion && !matchesVersionFilter(r.codebase, filter.dandiCodebaseVersion)) return false;
         if (filter.assetSize && !matchesAssetSizeExpr(r, filter.assetSize)) return false;
         if (normalizedFilterStatus === "stalled") {
             if (!isStalled(r)) return false;
@@ -643,6 +643,66 @@ function compareVersionsDescending(a, b) {
     }
     return comparePrereleases(right.prerelease, left.prerelease);
 }
+
+const VERSION_COMPARISON_PATTERN = /^(>=|<=|==|=|>|<)\s*(\S+)$/;
+
+// A version comparison such as "<1.5" or ">=v1.3.0", or null for anything else.
+function parseVersionComparison(text) {
+    const match = VERSION_COMPARISON_PATTERN.exec(String(text ?? "").trim());
+    if (!match || !parseVersion(match[2])) return null;
+    return { op: match[1] === "==" ? "=" : match[1], version: match[2] };
+}
+
+function isVersionFilterValue(value) {
+    return !/^[<>=]/.test(value) || parseVersionComparison(value) !== null;
+}
+
+// Whether a version satisfies a filter value: comma-separated clauses, each an
+// exact version or a comparison, all of which must hold. Values that aren't
+// versions never satisfy a comparison.
+function matchesVersionFilter(version, filterValue) {
+    return String(filterValue)
+        .split(",")
+        .map((clause) => clause.trim())
+        .filter(Boolean)
+        .every((clause) => {
+            const comparison = parseVersionComparison(clause);
+            if (!comparison) return version === clause;
+            if (!parseVersion(version)) return false;
+            // Negative when `version` is the newer of the two.
+            const order = compareVersionsDescending(version, comparison.version);
+            switch (comparison.op) {
+                case ">":
+                    return order < 0;
+                case ">=":
+                    return order <= 0;
+                case "<":
+                    return order > 0;
+                case "<=":
+                    return order >= 0;
+                default:
+                    return order === 0;
+            }
+        });
+}
+
+// The comparisons to suggest for a version key: the operator typed against each
+// version the jobs have (newest first), with how many jobs each one leaves.
+function searchComparisonCounts(def, runs, operator, typedVersion) {
+    const counts = [];
+    let previous = null;
+    for (const { value } of searchValueCounts(def, runs)) {
+        if (!parseVersion(value) || !normalizeSearchText(value).includes(typedVersion)) continue;
+        // "v1.2.4" and "1.2.4" make the same comparison.
+        if (previous !== null && compareVersionsDescending(previous, value) === 0) continue;
+        previous = value;
+        const expression = `${operator}${value}`;
+        const count = applyFilter(runs, { [def.field]: expression }).length;
+        if (count > 0) counts.push({ value: expression, count });
+    }
+    return counts;
+}
+
 const SEARCH_SUGGESTIONS_ID = "run-search-suggestions";
 
 // The search's filter keys, in the order the search bar writes them. `field` is
@@ -651,6 +711,8 @@ const SEARCH_SUGGESTIONS_ID = "run-search-suggestions";
 // of `options` whose job counts come from applyFilter. Values are listed most
 // common first, or by the key's own `order`. A `multiple` key ANDs
 // its terms together (size:>10 size:<100); any other keeps only its last term.
+// A key with a `comparison` takes ranges (version:<1.5), which add up, though
+// of several exact values only the last counts.
 // `views` limits a key to those views and `excludeViews` keeps it off those.
 // Options are functions as some read constants declared further down the file.
 const SEARCH_FILTERS = [
@@ -676,9 +738,13 @@ const SEARCH_FILTERS = [
         key: "version",
         field: "pipelineVersion",
         param: "pipelineVersion",
-        description: "Pipeline version",
+        description: "Pipeline version, or a range such as version:<1.5",
         values: (run) => [run.pipelineVersion],
         order: compareVersionsDescending,
+        multiple: true,
+        comparison: parseVersionComparison,
+        validate: isVersionFilterValue,
+        invalid: "Write version ranges like version:<1.5 or version:>=1.3.0.",
     },
     {
         key: "params",
@@ -698,9 +764,13 @@ const SEARCH_FILTERS = [
         key: "codebase",
         field: "dandiCodebaseVersion",
         param: "dandiCodebaseVersion",
-        description: "DANDI Compute codebase version",
+        description: "DANDI Compute codebase version, or a range such as codebase:>=0.4",
         values: (run) => [run.codebase],
         order: compareVersionsDescending,
+        multiple: true,
+        comparison: parseVersionComparison,
+        validate: isVersionFilterValue,
+        invalid: "Write codebase ranges like codebase:>=0.4 or codebase:<1.0.0.",
     },
     {
         key: "size",
@@ -709,6 +779,7 @@ const SEARCH_FILTERS = [
         description: "Asset size in GB, such as size:>10",
         options: () => ASSET_SIZE_SUGGESTIONS,
         multiple: true,
+        comparison: parseAssetSizeExpr,
         validate: (value) => parseAssetSizeExpr(value) !== null,
         invalid: "Write sizes in GB, like size:>10 or size:<=100.",
     },
@@ -845,7 +916,7 @@ function searchTermsToParams(terms, viewMode = _viewMode) {
     const params = {};
     const text = [];
     const problems = new Set();
-    const seen = new Set();
+    const collected = new Map();
     for (const term of terms) {
         const def = resolveSearchFilter(term.key, viewMode);
         if (term.key !== null && !def) {
@@ -864,13 +935,23 @@ function searchTermsToParams(terms, viewMode = _viewMode) {
             problems.add(def.invalid);
             continue;
         }
-        if (def.multiple) {
-            params[def.param] = params[def.param] ? `${params[def.param]}, ${value}` : value;
+        const entry = collected.get(def) ?? { exact: null, clauses: [] };
+        collected.set(def, entry);
+        if (def.multiple && (!def.comparison || def.comparison(value))) {
+            entry.clauses.push(value);
         } else {
-            if (seen.has(def.key)) problems.add(`Only the last ${def.key}: term is used.`);
-            params[def.param] = value;
+            if (entry.exact !== null) {
+                problems.add(
+                    def.multiple
+                        ? `Of several exact ${def.key}: values, only the last is used.`
+                        : `Only the last ${def.key}: term is used.`
+                );
+            }
+            entry.exact = value;
         }
-        seen.add(def.key);
+    }
+    for (const [def, { exact, clauses }] of collected) {
+        params[def.param] = [...(exact === null ? [] : [exact]), ...clauses].join(", ");
     }
     if (text.length > 0) params.text = text.join(" ");
     return { params, problems: [...problems] };
@@ -933,11 +1014,12 @@ function searchAppliesLive() {
     return _viewMode !== "issues";
 }
 
-// Whether a key's value is finished: one some job has (keys match exactly, so
-// a partial value would match nothing), or for a validated key, a valid one.
+// Whether a key's value is finished: a valid comparison, or a value some job
+// has (keys match exactly, so a partial value would match nothing).
 function isCompleteSearchValue(def, value, runs) {
     if (!value) return false;
-    if (def.validate) return def.validate(value);
+    if (def.validate && !def.validate(value)) return false;
+    if (def.comparison?.(value)) return true;
     if (def.options) return def.options(runs).some((option) => option.toLowerCase() === value.toLowerCase());
     const canonical = def.canonical ?? String;
     const wanted = canonical(value);
@@ -1033,23 +1115,33 @@ function searchSuggestionGroups(text, caret, runs, viewMode = _viewMode) {
     const term = searchTermAt(text, caret);
     const others = parseSearchTerms(text).filter((other) => other.start !== term.start);
     const otherFilter = searchTermsToFilter(others, viewMode);
+    // A new exact value replaces a key's old one, so that doesn't narrow the
+    // key's own suggestions. Its other terms (size:>10, version:<1.5) do.
+    const baseFilter = (def) => {
+        if (!def.multiple) return { ...otherFilter, [def.field]: null };
+        if (!def.comparison) return otherFilter;
+        const ranges = String(otherFilter[def.field] ?? "")
+            .split(",")
+            .map((clause) => clause.trim())
+            .filter((clause) => clause && def.comparison(clause));
+        return { ...otherFilter, [def.field]: ranges.join(", ") || null };
+    };
     const valueSuggestions = (def, typed) => {
-        // A single-valued key's new term replaces its old one, so the old one
-        // doesn't narrow its own suggestions.
-        const base = applyFilter(runs, def.multiple ? otherFilter : { ...otherFilter, [def.field]: null });
-        return searchValueCounts(def, base)
-            .filter(({ value }) => normalizeSearchText(value).includes(typed))
-            .slice(0, SEARCH_MAX_VALUE_SUGGESTIONS)
-            .map(({ value, count }) => ({
-                text: formatSearchTerm(def.key, value),
-                key: def.key,
-                value,
-                hint: def.hint ? def.hint(value) : String(count),
-                count,
-                counted: !def.hint,
-                complete: true,
-                swatch: def.swatch?.(value) ?? null,
-            }));
+        const base = applyFilter(runs, baseFilter(def));
+        const operator = def.comparison && def.values ? /^(>=|<=|==|=|>|<)/.exec(typed)?.[0] : null;
+        const counts = operator
+            ? searchComparisonCounts(def, base, operator, typed.slice(operator.length).trim())
+            : searchValueCounts(def, base).filter(({ value }) => normalizeSearchText(value).includes(typed));
+        return counts.slice(0, SEARCH_MAX_VALUE_SUGGESTIONS).map(({ value, count }) => ({
+            text: formatSearchTerm(def.key, value),
+            key: def.key,
+            value,
+            hint: def.hint ? def.hint(value) : String(count),
+            count,
+            counted: !def.hint,
+            complete: true,
+            swatch: def.swatch?.(value) ?? null,
+        }));
     };
     const filterSuggestion = (def) => ({
         text: `${def.key}:`,

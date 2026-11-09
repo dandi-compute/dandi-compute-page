@@ -2457,7 +2457,7 @@ describe("search terms", () => {
             text: "verson:v3",
         });
         expect(problems).toEqual([
-            "Only the last version: term is used.",
+            "Of several exact version: values, only the last is used.",
             "Write sizes in GB, like size:>10 or size:<=100.",
             "There is no verson: filter, so it was searched as text. Did you mean version:?",
         ]);
@@ -2512,6 +2512,46 @@ describe("compareVersionsDescending", () => {
     it("ties versions that differ only in a v prefix or build metadata", () => {
         expect(compareVersionsDescending("v1.2.4", "1.2.4")).toBe(0);
         expect(compareVersionsDescending("v1.0.1+20abeb6", "1.0.1")).toBe(0);
+    });
+});
+
+describe("version ranges", () => {
+    const versions = ["1.5.0", "1.4.0", "v1.3.2", "v1.2.4", "1.2.4", "abc1234"];
+    const runs = versions.map((pipelineVersion) => ({ pipelineVersion, codebase: pipelineVersion }));
+    const matching = (filter) => applyFilter(runs, filter).map((run) => run.pipelineVersion);
+
+    it.each([
+        ["<1.5", ["1.4.0", "v1.3.2", "v1.2.4", "1.2.4"]],
+        ["<=1.4", ["1.4.0", "v1.3.2", "v1.2.4", "1.2.4"]],
+        [">v1.3.2", ["1.5.0", "1.4.0"]],
+        [">=1.3, <1.5", ["1.4.0", "v1.3.2"]],
+        ["=1.2.4", ["v1.2.4", "1.2.4"]],
+        ["1.2.4", ["1.2.4"]],
+        ["v1.2.4, <1.3", ["v1.2.4"]],
+    ])("version:%s", (expression, expected) => {
+        expect(matching({ pipelineVersion: expression })).toEqual(expected);
+        expect(matching({ dandiCodebaseVersion: expression })).toEqual(expected);
+    });
+
+    it("combines ranges, keeps the last exact value, and reports a malformed range", () => {
+        const { params, problems } = searchTermsToParams(
+            parseSearchTerms("version:>=1.3 version:1.2.4 version:<1.5 version:1.4.0 codebase:<abc")
+        );
+        expect(params).toEqual({ pipelineVersion: "1.4.0, >=1.3, <1.5" });
+        expect(problems).toEqual([
+            "Of several exact version: values, only the last is used.",
+            "Write codebase ranges like codebase:>=0.4 or codebase:<1.0.0.",
+        ]);
+    });
+
+    it("reads a range back as its terms", () => {
+        expect(filterToSearchText({ pipelineVersion: ">=1.3, <1.5" })).toBe("version:>=1.3 version:<1.5");
+    });
+
+    it("applies a range while typing once it is complete", () => {
+        expect(liveSearchText("version:<1.5", 12, runs)).toBe("version:<1.5");
+        expect(liveSearchText("version:<1.", 11, runs)).toBe("");
+        expect(liveSearchText("version:<", 9, runs)).toBe("");
     });
 });
 
