@@ -596,13 +596,13 @@ h1 {
     }
 }
 
-/* ─── Queue priorities (top display) ────────────────────────── */
+/* ─── Queue priorities (Status page, under the queue) ───────── */
 .queue-priorities {
     background: var(--color-surface);
     border: 1px solid var(--color-border);
     border-radius: var(--radius);
     padding: 12px 16px 14px;
-    margin-bottom: 16px;
+    margin-top: 14px;
 }
 .queue-priorities-header {
     display: flex;
@@ -2360,164 +2360,237 @@ a.prov-hash-link:hover {
     background: var(--color-accent-subtle);
     border: 1px solid rgba(var(--color-accent-rgb), 0.3);
     border-radius: var(--radius);
-    padding: 9px 16px;
+    padding: 12px 16px 10px;
     margin: 0 0 20px;
     font-size: 0.88em;
 }
 
-.filter-banner-main {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-start;
-    gap: 10px;
+/* ─── Search bar ────────────────────────────────────────────── */
+/* One search over the queue views (see the Search bar section of app.js),
+   after the record search on CodyCBakerPhD/website. */
+.run-search [hidden] {
+    display: none !important;
 }
 
-.filter-form {
+.run-search {
     display: flex;
-    flex: 1;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    gap: 8px;
-}
-
-.filter-input-wrap {
-    display: inline-flex;
     flex-direction: column;
-    gap: 4px;
+    gap: 7px;
+    margin: 0;
 }
 
-.filter-input-label {
-    font-size: 0.75em;
-    color: var(--color-text-secondary);
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
+.run-search-field {
+    position: relative;
 }
 
-.filter-input {
+.run-search-icon {
+    position: absolute;
+    top: 50%;
+    left: 14px;
+    width: 15px;
+    height: 15px;
+    fill: var(--color-text-secondary);
+    transform: translateY(-50%);
+    pointer-events: none;
+}
+
+.run-search-input {
     box-sizing: border-box;
-    width: 168px;
-    max-width: 100%;
-    border: 1px solid var(--color-border);
-    background: var(--color-surface);
-    color: var(--color-text);
-    border-radius: var(--radius);
-    padding: 5px 8px;
+    width: 100%;
+    padding: 9px 16px 9px 38px;
     font: inherit;
-    line-height: 1.2;
-}
-
-.filter-input:focus {
-    outline: 1px solid var(--color-accent);
-    outline-offset: 1px;
-}
-
-.filter-input-row {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-}
-
-.filter-input-clear {
-    color: var(--color-text-secondary);
-    font-size: 1em;
-    line-height: 1;
-    text-decoration: none;
-    padding: 2px 5px;
-    border-radius: var(--radius);
-    border: 1px solid transparent;
-    cursor: pointer;
-    white-space: nowrap;
+    font-size: 1.05em;
+    line-height: 1.4;
+    color: var(--color-text);
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
     transition:
-        color 0.15s,
-        border-color 0.15s;
+        border-color 0.15s,
+        box-shadow 0.15s;
 }
 
-.filter-input-clear:hover {
-    border-color: var(--color-border);
+.run-search-input::placeholder {
+    color: var(--color-text-secondary);
+    opacity: 1;
 }
 
-.filter-input-clear-active {
-    color: var(--color-failed);
+.run-search-input:focus {
+    outline: none;
+    border-color: var(--color-accent);
+    box-shadow: 0 0 0 3px rgba(var(--color-accent-rgb), 0.25);
 }
 
-.filter-input-clear-active:hover {
-    border-color: var(--color-failed);
+/* Suggestions: filter keys, then the values of the one being typed. */
+.run-search-suggestions {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    z-index: 50;
+    max-height: 340px;
+    margin: 0;
+    padding: 6px;
+    overflow-y: auto;
+    list-style: none;
+    background: var(--color-surface);
+    border: 1px solid var(--color-border);
+    border-radius: 10px;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.22);
 }
 
-.filter-apply {
-    color: var(--color-accent);
-    background: transparent;
-    border: 1px solid var(--color-accent);
-    border-radius: var(--radius);
-    padding: 3px 10px;
-    font-size: 0.85em;
-    cursor: pointer;
-    white-space: nowrap;
-}
-
-.filter-apply:hover {
-    background: var(--color-accent-subtle);
-}
-
-.filter-banner-label {
-    font-size: 0.82em;
-    font-weight: 600;
-    letter-spacing: 0.04em;
+.run-search-group-label {
+    padding: 8px 10px 4px;
+    font-size: 0.72em;
+    font-weight: 700;
+    letter-spacing: 0.06em;
     text-transform: uppercase;
     color: var(--color-text-secondary);
-    white-space: nowrap;
 }
 
-.filter-crumbs {
+.run-search-option {
     display: flex;
-    align-items: center;
-    gap: 6px;
-    flex-wrap: wrap;
-}
-
-.filter-banner-active {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
-}
-
-.filter-crumb {
-    color: var(--color-accent);
-    text-decoration: none;
-    font-weight: 600;
-}
-.filter-crumb:hover {
-    text-decoration: underline;
-}
-
-.filter-sep {
-    color: var(--color-text-secondary);
-}
-
-.filter-actions {
-    flex-basis: 100%;
-    display: flex;
-    justify-content: flex-end;
-    align-items: center;
-    gap: 8px;
-}
-
-.filter-clear {
-    color: var(--color-text-secondary);
-    text-decoration: none;
-    border: 1px solid var(--color-border);
+    align-items: baseline;
+    gap: 16px;
+    padding: 6px 10px;
     border-radius: var(--radius);
-    padding: 3px 10px;
-    font-size: 0.85em;
-    white-space: nowrap;
-    transition:
-        color 0.15s,
-        border-color 0.15s;
+    cursor: pointer;
 }
-.filter-clear:hover {
-    color: var(--color-failed);
-    border-color: var(--color-failed);
+
+.run-search-option[aria-selected="true"] {
+    background: rgba(var(--color-accent-rgb), 0.16);
+}
+
+.run-search-option-term {
+    min-width: 0;
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.9em;
+    overflow-wrap: anywhere;
+}
+
+.run-search-option-key {
+    color: var(--color-accent);
+}
+
+.run-search-option-value {
+    font-weight: 700;
+    color: var(--color-text);
+}
+
+/* A filter's description lines up in a column beside its key. */
+.run-search-option-filter .run-search-option-term {
+    flex: 0 0 auto;
+    min-width: 11ch;
+}
+
+.run-search-option-hint,
+.run-search-option-count {
+    font-size: 0.85em;
+    color: var(--color-text-secondary);
+}
+
+.run-search-option-count {
+    flex: 0 0 auto;
+    margin-left: auto;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Colored like the value's tag on job cards (e.g. a pipeline's). */
+.run-search-swatch {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    margin-right: 8px;
+    border-radius: 50%;
+    background: var(--tag-color, var(--color-text-secondary));
+}
+
+.run-search-tip {
+    margin-top: 6px;
+    padding: 8px 10px 4px;
+    font-size: 0.82em;
+    color: var(--color-text-secondary);
+    border-top: 1px solid var(--color-border);
+}
+
+.run-search-status {
+    margin: 0;
+    padding: 0 8px;
+    font-size: 0.92em;
+    color: var(--color-text-secondary);
+}
+
+/* Where the job cards would be, when no job matches the search. */
+.runs-empty {
+    margin: 0;
+    padding: 32px 16px;
+    text-align: center;
+    color: var(--color-text-secondary);
+    background: var(--color-surface);
+    border: 1px dashed var(--color-border);
+    border-radius: var(--radius);
+}
+
+/* ─── Job card tags ─────────────────────────────────────────── */
+/* "key | value" labels on job cards (see renderRunTags), each a link that
+   toggles its term in the search. --tag-color is set per value below. */
+.run-tag {
+    --tag-color: #8a8fa8;
+    --tag-on-color: #ffffff;
+    display: inline-flex;
+    align-items: stretch;
+    flex-shrink: 0;
+    margin-top: 2px;
+    font-size: 0.74em;
+    font-weight: 600;
+    line-height: 1.6;
+    white-space: nowrap;
+    text-decoration: none;
+    border: 1px solid var(--tag-color);
+    border-radius: 20px;
+    overflow: hidden;
+}
+
+.run-tag-key {
+    padding: 0 7px 0 9px;
+    font-size: 0.9em;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--tag-on-color);
+    background: var(--tag-color);
+}
+
+.run-tag-value {
+    padding: 0 9px 0 7px;
+    color: var(--color-text);
+    background: color-mix(in srgb, var(--tag-color) 18%, var(--color-surface));
+    transition: background 0.15s;
+}
+
+.run-tag:hover .run-tag-value {
+    background: color-mix(in srgb, var(--tag-color) 34%, var(--color-surface));
+}
+
+/* The tag whose term the search holds. */
+.run-tag-active .run-tag-value,
+.run-tag-active:hover .run-tag-value {
+    color: var(--tag-on-color);
+    background: var(--tag-color);
+}
+
+.run-tag:focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+}
+
+.run-tag-pipeline-aind-ephys {
+    --tag-color: #5b8def;
+    --tag-on-color: #ffffff;
+}
+
+.run-tag-pipeline-lfp {
+    --tag-color: #d4a72c;
+    --tag-on-color: #1a1a2e;
 }
 
 /* ─── Tests-page banner ─────────────────────────────────────── */
@@ -3047,6 +3120,14 @@ a.prov-hash-link:hover {
 
 .flat-ctx-date {
     color: var(--color-text-secondary);
+}
+
+/* On a phone the context takes a row of its own, rather than a sliver beside
+   the status badge and tags. */
+@media (max-width: 600px) {
+    .flat-run-context {
+        flex-basis: 100%;
+    }
 }
 
 /* ─── Params editor ─────────────────────────────────────────── */
