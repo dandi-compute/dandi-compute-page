@@ -3,7 +3,7 @@
    TODO: once this project migrates to TS + Vite, source this from
    package.json directly (e.g. via Vite's `define`) instead of duplicating
    it here. */
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.4.0";
 const OWNER = "dandi-compute";
 const REPO = "001697";
 const BRANCH = "draft";
@@ -2846,8 +2846,8 @@ const SQUEUE_POLL_INTERVAL_MS = 60 * 1000;
 // Three missed 5-minute snapshots mark the view stale.
 const SQUEUE_STALE_AFTER_MS = 15 * 60 * 1000;
 /* The disk usage snapshot (launcher/disk.sh in dandi-compute-runner) is taken
-   every 30 minutes: `df` for the DANDI project directories, then the home
-   directory's quota report (ORCD's ~/orcd/.quota, the one shown at login),
+   every 30 minutes: `df` for the DANDI project directories, on space and,
+   in newer snapshots, on inodes, then the home directory's quota report (ORCD's ~/orcd/.quota, the one shown at login),
    or `du` of the home directory should that report be missing. Shown on the
    Status page. */
 const SQUEUE_KIND = "monitor";
@@ -3328,20 +3328,34 @@ const renderDiskMetersCaption = (title, note = null) =>
     `<div class="disk-meters-caption"><span>${e(title)}</span>${note ? `<span class="disk-meters-note">${e(note)}</span>` : ""}</div>`;
 
 // The df table's filesystems as meters: the mount point, then used / size,
-// with what is left in the tooltip. Null when the table lacks those columns
-// or has no rows.
+// with what is left in the tooltip. When the table also has df's inode
+// columns, each filesystem gets a second meter for its number of files, as a
+// quota does. Null when the table lacks the space columns or has no rows.
 function renderDfMeters({ columns, rows }) {
     const column = (label) => columns.findIndex((c) => c.label === label);
     const [mount, size, used, avail, pcent] = ["Mounted", "Size", "Used", "Avail", "Use%"].map(column);
     if ([mount, size, used, pcent].some((index) => index < 0) || rows.length === 0) return null;
-    const meters = rows.map((row) =>
-        renderDiskMeter({
+    const [inodes, iused, ifree, ipcent] = ["Inodes", "IUsed", "IFree", "IUse%"].map(column);
+    const hasInodes = [inodes, iused, ipcent].every((index) => index >= 0);
+    const meters = rows.map((row) => {
+        const space = renderDiskMeter({
             name: row[mount],
+            kind: hasInodes ? "space" : null,
             percentCell: row[pcent],
             text: `${row[used]} / ${row[size]}`,
             title: avail >= 0 ? `${row[avail]} available` : null,
-        })
-    );
+        });
+        if (!hasInodes) return space;
+        const files = renderDiskMeter({
+            name: row[mount],
+            kind: "files",
+            continued: true,
+            percentCell: row[ipcent],
+            text: `${row[iused]} / ${row[inodes]}`,
+            title: ifree >= 0 ? `${row[ifree]} files available` : null,
+        });
+        return space + files;
+    });
     return renderDiskMetersCaption("Filesystems") + meters.join("");
 }
 
@@ -3440,20 +3454,35 @@ function renderDiskChip(label, percentCell, title) {
     return `<span class="disk-pct disk-pct-${kind}" title="${e(title)}">${e(label)} ${e(percentCell)}</span>`;
 }
 
-// Chips in the title bar: one per filesystem of the df table (its mount point
-// and how full it is), then how full the home directory's quota is, on space
-// and on files.
+// Chips in the title bar: per filesystem of the df table, its mount point and
+// how full it is, and how full its inodes are when the table has them; then
+// how full the home directory's quota is, on space and on files.
 function renderDiskChips(snapshot) {
     const stdout = squeueScreenText(snapshot.stdout);
     const blocks = stdout ? stdout.split(/\n{2,}/) : [];
     const chips = [];
     const table = blocks.length > 0 && !parseQuotaReport(blocks[0]) ? parseSqueueTable(blocks[0]) : null;
-    const mountColumn = table ? table.columns.findIndex(({ label }) => label === "Mounted") : -1;
-    const percentColumn = table ? table.columns.findIndex(({ label }) => label === "Use%") : -1;
+    const column = (label) => (table ? table.columns.findIndex((c) => c.label === label) : -1);
+    const [mountColumn, percentColumn, inodesColumn, iusedColumn, ipercentColumn] = [
+        "Mounted",
+        "Use%",
+        "Inodes",
+        "IUsed",
+        "IUse%",
+    ].map(column);
     if (mountColumn >= 0 && percentColumn >= 0) {
         for (const row of table.rows) {
-            if (parseUsePercent(row[percentColumn]) === null) continue;
-            chips.push(renderDiskChip(row[mountColumn], row[percentColumn], row[mountColumn]));
+            const mount = row[mountColumn];
+            if (parseUsePercent(row[percentColumn]) !== null) {
+                chips.push(renderDiskChip(mount, row[percentColumn], mount));
+            }
+            if (ipercentColumn >= 0 && parseUsePercent(row[ipercentColumn]) !== null) {
+                const title =
+                    inodesColumn >= 0 && iusedColumn >= 0
+                        ? `${mount}: ${row[iusedColumn]} of ${row[inodesColumn]} files`
+                        : mount;
+                chips.push(renderDiskChip(`${mount} files`, row[ipercentColumn], title));
+            }
         }
     }
     const quota = blocks.map(parseQuotaReport).find(Boolean);

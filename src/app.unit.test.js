@@ -5057,6 +5057,90 @@ describe("live squeue monitor", () => {
         );
     });
 
+    it("renders each filesystem's inode use and limit beside its space when the snapshot has them", () => {
+        const stdout = DISK_STDOUT.replace(
+            DISK_DF_STDOUT,
+            [
+                "Mounted               Size  Used Avail Use% Inodes IUsed IFree IUse%",
+                "/orcd/data/dandi/001  968T  792T  176T  72%   2.0G  1.3G  700M   65%",
+                "/orcd/data/dandi/002  682T  634T   48T  93%   1.5G  1.4G  100M   94%",
+            ].join("\n")
+        );
+        const snapshot = {
+            branch: "disk/2026-11-05",
+            recordName: "14/20261105T143001-usage",
+            takenAt: Date.parse("2026-11-05T19:30:01Z"),
+            stdout,
+            stderr: "",
+            exitStatus: "0",
+            sourceUrl: "https://example.org/stdout",
+        };
+        const root = document.createElement("div");
+        root.innerHTML = renderDiskMonitor({ snapshot }, NOW.getTime());
+
+        const chips = [...root.querySelectorAll(".squeue-tally .disk-pct")];
+        expect(chips.map((chip) => [chip.textContent, chip.className, chip.title])).toEqual([
+            ["/orcd/data/dandi/001 72%", "disk-pct disk-pct-ok", "/orcd/data/dandi/001"],
+            ["/orcd/data/dandi/001 files 65%", "disk-pct disk-pct-ok", "/orcd/data/dandi/001: 1.3G of 2.0G files"],
+            ["/orcd/data/dandi/002 93%", "disk-pct disk-pct-critical", "/orcd/data/dandi/002"],
+            [
+                "/orcd/data/dandi/002 files 94%",
+                "disk-pct disk-pct-critical",
+                "/orcd/data/dandi/002: 1.4G of 1.5G files",
+            ],
+            ["home 85.36%", "disk-pct disk-pct-warn", "Home directory: 170.7 of 200.0 GB"],
+            ["home files 100.00%", "disk-pct disk-pct-critical", "Home directory: 1.0M of 1.0M files"],
+        ]);
+
+        // Each filesystem gets a space meter and, under it, a files meter, as the home quota does.
+        const screen = root.querySelector(".squeue-screen");
+        expect(screen.querySelectorAll("table")).toHaveLength(0);
+        const meters = [...screen.querySelectorAll(".disk-meter")];
+        expect(
+            meters.map((m) => [
+                m.querySelector(".disk-meter-label").textContent,
+                m.querySelector(".disk-meter-text").textContent,
+                m.querySelector(".disk-pct").textContent,
+                m.className,
+                m.title,
+            ])
+        ).toEqual([
+            ["/orcd/data/dandi/001space", "792T / 968T", "72%", "disk-meter disk-meter-ok", "176T available"],
+            ["files", "1.3G / 2.0G", "65%", "disk-meter disk-meter-ok disk-meter-continued", "700M files available"],
+            ["/orcd/data/dandi/002space", "634T / 682T", "93%", "disk-meter disk-meter-critical", "48T available"],
+            [
+                "files",
+                "1.4G / 1.5G",
+                "94%",
+                "disk-meter disk-meter-critical disk-meter-continued",
+                "100M files available",
+            ],
+            ["HOMEspace", "170.7 / 200.0 GB", "85.36%", "disk-meter disk-meter-warn", ""],
+            ["files", "1.0M / 1.0M", "100.00%", "disk-meter disk-meter-critical disk-meter-continued", ""],
+        ]);
+        expect(meters[1].querySelector(".disk-meter-bar").getAttribute("aria-label")).toBe(
+            "/orcd/data/dandi/001 files: 65% used"
+        );
+
+        // A filesystem that reports no inodes ("-") keeps its files meter, without a bar or a chip.
+        const noInodes = document.createElement("div");
+        noInodes.innerHTML = renderDiskMonitor(
+            {
+                snapshot: {
+                    ...snapshot,
+                    stdout: stdout.replace("1.5G  1.4G  100M   94%", "   -     -     -     -"),
+                },
+            },
+            NOW.getTime()
+        );
+        const unknown = noInodes.querySelectorAll(".disk-meter")[3];
+        expect(unknown.className).toBe("disk-meter disk-meter-unknown disk-meter-continued");
+        expect(unknown.querySelector(".disk-meter-bar").getAttribute("role")).toBeNull();
+        expect([...noInodes.querySelectorAll(".squeue-tally .disk-pct")].map((chip) => chip.textContent)).not.toContain(
+            "/orcd/data/dandi/002 files -"
+        );
+    });
+
     it("mounts the disk monitor into its container and polls it on its own", async () => {
         vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
         vi.setSystemTime(NOW);
