@@ -11,6 +11,7 @@
 - Made the flat view the default and listed it before the tree view. ([#223](https://github.com/dandi-compute/dandi-compute-page/pull/223))
 - Showed the Status page's disk snapshot as meters, one per DANDI filesystem and two per quota (space and number of files). ([#224](https://github.com/dandi-compute/dandi-compute-page/pull/224))
 - Dropped the unused SCRATCH and POOL quotas from the Status page's disk meters, leaving only the home directory's. ([#225](https://github.com/dandi-compute/dandi-compute-page/pull/225))
+- Added a files meter and chip for each DANDI filesystem to the Status page, showing its inode use against its limit when the disk snapshot records them. ([#227](https://github.com/dandi-compute/dandi-compute-page/pull/227))
 - Renamed the Status page's headings to SLURM Queue and Disk Usage, dropped the notes under them, and removed the DANDI Archive backup partitions, which the disk snapshot already covers. ([#224](https://github.com/dandi-compute/dandi-compute-page/pull/224))
 
 ### 🐛 Bug Fix
