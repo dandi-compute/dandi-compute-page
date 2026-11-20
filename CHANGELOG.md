@@ -12,6 +12,7 @@
 - Showed the Status page's disk snapshot as meters, one per DANDI filesystem and two per quota (space and number of files). ([#224](https://github.com/dandi-compute/dandi-compute-page/pull/224))
 - Dropped the unused SCRATCH and POOL quotas from the Status page's disk meters, leaving only the home directory's. ([#225](https://github.com/dandi-compute/dandi-compute-page/pull/225))
 - Added a files meter and chip for each DANDI filesystem to the Status page, showing its inode use against its limit when the disk snapshot records them. ([#227](https://github.com/dandi-compute/dandi-compute-page/pull/227))
+- Added a Blob heads section to the Status page that shows the usage each partition should have, from simple-s3-backup's partition spec and each head's size in the bucket, and flags heads whose directories are missing or misplaced. Selecting a head projects the partitions with it moved, to plan a change. ([#228](https://github.com/dandi-compute/dandi-compute-page/pull/228))
 - Renamed the Status page's headings to SLURM Queue and Disk Usage, dropped the notes under them, and removed the DANDI Archive backup partitions, which the disk snapshot already covers. ([#224](https://github.com/dandi-compute/dandi-compute-page/pull/224))
 
 ### 🐛 Bug Fix
