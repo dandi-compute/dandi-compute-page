@@ -36,6 +36,9 @@ const {
     refreshDiskMonitor,
     renderSqueueMonitor,
     renderDiskMonitor,
+    parseBlobHeads,
+    parseDfSize,
+    formatDfSize,
     renderStatusPage,
     stopMonitors,
     summarizeSqueueJobs,
@@ -5139,6 +5142,110 @@ describe("live squeue monitor", () => {
         expect([...noInodes.querySelectorAll(".squeue-tally .disk-pct")].map((chip) => chip.textContent)).not.toContain(
             "/orcd/data/dandi/002 files -"
         );
+    });
+
+    // What launcher/blob_heads.sh measures once a day, and disk.sh appends to the snapshot.
+    const BLOB_HEADS_STDOUT = [
+        "Blob heads, measured 2026-11-05 02:58 EST",
+        "Head Partition            Bytes      Files",
+        "0    001         109951162777600     120000",
+        "1    001         219902325555200     240000",
+        "a    001           2199023255552       1000",
+        "a    002         329853488332800     300000",
+        "f    002                       ?          ?",
+    ].join("\n");
+
+    it("reads the blob heads block, sizes as df prints them, and formats bytes the same way", () => {
+        expect(parseBlobHeads(BLOB_HEADS_STDOUT)).toEqual({
+            measured: "2026-11-05 02:58 EST",
+            rows: [
+                { head: "0", partition: "001", bytes: 109951162777600, files: 120000 },
+                { head: "1", partition: "001", bytes: 219902325555200, files: 240000 },
+                { head: "a", partition: "001", bytes: 2199023255552, files: 1000 },
+                { head: "a", partition: "002", bytes: 329853488332800, files: 300000 },
+                { head: "f", partition: "002", bytes: null, files: null },
+            ],
+        });
+        expect(parseBlobHeads(DISK_DF_STDOUT)).toBeNull();
+        expect(parseBlobHeads("Blob heads, measured today\nnot a table at all")).toBeNull();
+    });
+
+    it.each([
+        ["968T", 968 * 1024 ** 4],
+        ["1.5P", 1.5 * 1024 ** 5],
+        ["0", 0],
+        ["-", null],
+    ])("parses the df size %s", (cell, expected) => {
+        expect(parseDfSize(cell)).toBe(expected);
+    });
+
+    it.each([
+        [109951162777600, "100T"],
+        [1.5 * 1024 ** 5, "1.5P"],
+        [4096, "4.0K"],
+        [null, "?"],
+    ])("formats %s bytes", (bytes, expected) => {
+        expect(formatDfSize(bytes)).toBe(expected);
+    });
+
+    it("splits each blob partition's bar into its heads and tabulates each head's share of either partition", () => {
+        const snapshot = {
+            branch: "disk/2026-11-05",
+            recordName: "14/20261105T143001-usage",
+            takenAt: Date.parse("2026-11-05T19:30:01Z"),
+            stdout: `${DISK_STDOUT}\n${BLOB_HEADS_STDOUT}\n`,
+            stderr: "",
+            exitStatus: "0",
+            sourceUrl: "https://example.org/stdout",
+        };
+        const root = document.createElement("div");
+        root.innerHTML = renderDiskMonitor({ snapshot }, NOW.getTime());
+        const screen = root.querySelector(".squeue-screen");
+
+        // The meters and chips are as before.
+        expect(screen.querySelectorAll(".disk-meter")).toHaveLength(4);
+        expect(root.querySelectorAll(".squeue-tally .disk-pct")).toHaveLength(4);
+
+        const section = screen.querySelector(".blob-heads");
+        expect(section.querySelector(".disk-meters-caption").textContent).toBe(
+            "Blob headsmeasured 2026-11-05 02:58 EST"
+        );
+        const rows = [...section.querySelectorAll(".blob-heads-row")];
+        expect(rows.map((row) => row.querySelector(".disk-meter-name").textContent)).toEqual(["001", "002"]);
+        // 001: 302T of blobs and 490T of other data in its 792T used; 002 has no measurement for head f.
+        expect(rows.map((row) => row.querySelector(".disk-meter-text").textContent)).toEqual([
+            "blobs 302T · other 490T · free 176T · of 968T",
+            "blobs 300T · other 334T · free 48T · of 682T",
+        ]);
+        const segments = [...rows[0].querySelectorAll(".blob-head-segment")];
+        expect(segments.map((segment) => segment.textContent)).toEqual(["0", "1", "a", ""]);
+        expect(segments[0].style.width).toBe(`${(100 / 968) * 100}%`);
+        expect(segments[0].title).toBe("Head 0 on 001: 100T, 10.3%");
+        expect(segments[3].className).toBe("blob-head-segment blob-head-other");
+        // A head keeps its color on either partition.
+        const headA = rows.map((row) =>
+            [...row.querySelectorAll(".blob-head-segment")].find((s) => s.textContent === "a")
+        );
+        expect(headA[0].style.background).toBe(headA[1].style.background);
+
+        const table = section.querySelector("table");
+        expect([...table.querySelectorAll("th")].map((th) => th.textContent)).toEqual([
+            "Head",
+            "On",
+            "Used",
+            "Files",
+            "% of 001",
+            "% of 002",
+        ]);
+        expect([...table.querySelectorAll("tbody tr")].map((tr) => [...tr.cells].map((td) => td.textContent))).toEqual([
+            ["0", "001", "100T", "120,000", "10.3%", "14.7%"],
+            ["1", "001", "200T", "240,000", "20.7%", "29.3%"],
+            ["a", "001", "2.0T", "1,000", "0.2%", "0.3%"],
+            ["a", "002", "300T", "300,000", "31.0%", "44.0%"],
+            ["f", "002", "?", "?", "", ""],
+        ]);
+        // The share of the partition a head is not on is what it would take if moved there.
+        expect(table.querySelector("tbody tr").cells[5].className).toBe("squeue-num blob-heads-moved");
     });
 
     it("mounts the disk monitor into its container and polls it on its own", async () => {

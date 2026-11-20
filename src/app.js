@@ -3,7 +3,7 @@
    TODO: once this project migrates to TS + Vite, source this from
    package.json directly (e.g. via Vite's `define`) instead of duplicating
    it here. */
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 const OWNER = "dandi-compute";
 const REPO = "001697";
 const BRANCH = "draft";
@@ -3411,6 +3411,129 @@ function renderDiskTable({ columns, rows }) {
     return `<table class="squeue-table disk-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
+// The space each blob head (the first hex digit of a content ID) takes on each
+// blob partition, as launcher/blob_heads.sh in dandi-compute-runner measures
+// it once a day: a "Blob heads, measured ..." line, then a table of Head,
+// Partition, Bytes and Files, one row per head and partition that holds any
+// of its blobs. { measured, rows: [{ head, partition, bytes, files }] }, with
+// `bytes` and `files` null when the measurement was cut short ("?"); null
+// when `text` is not such a block.
+const BLOB_HEADS_TITLE = "Blob heads";
+const BLOB_HEADS_COLUMNS = ["Head", "Partition", "Bytes", "Files"];
+function parseBlobHeads(text) {
+    const [title, ...lines] = String(text ?? "").split("\n");
+    if (!title.startsWith(BLOB_HEADS_TITLE)) return null;
+    const table = parseSqueueTable(lines.join("\n"));
+    if (!table) return null;
+    const indexes = BLOB_HEADS_COLUMNS.map((label) => table.columns.findIndex((c) => c.label === label));
+    if (indexes.some((index) => index < 0)) return null;
+    const count = (cell) => (/^\d+$/.test(cell) ? Number(cell) : null);
+    const rows = table.rows.map((row) => {
+        const [head, partition, bytes, files] = indexes.map((index) => row[index]);
+        return { head: head.toLowerCase(), partition, bytes: count(bytes), files: count(files) };
+    });
+    const measuredMatch = /measured\s+(.+)$/.exec(title);
+    const blobHeads = { measured: measuredMatch ? measuredMatch[1].trim() : null, rows };
+    return blobHeads;
+}
+
+// A size as `df -h` prints it ("968T", "1.5P", "0"), in bytes; null otherwise.
+const DF_SIZE_POWERS = { "": 0, K: 1, M: 2, G: 3, T: 4, P: 5, E: 6 };
+function parseDfSize(cell) {
+    const match = /^(\d+(?:\.\d+)?)([KMGTPE]?)$/.exec((cell ?? "").trim());
+    if (!match) return null;
+    const bytes = Number(match[1]) * 1024 ** DF_SIZE_POWERS[match[2]];
+    return bytes;
+}
+
+// Bytes the way `df -h` shows them, so the blob heads read like the filesystems: "12T", "1.5P".
+function formatDfSize(bytes) {
+    if (bytes === null || !Number.isFinite(bytes)) return "?";
+    const units = ["", "K", "M", "G", "T", "P", "E"];
+    let value = bytes;
+    let unit = 0;
+    while (value >= 1024 && unit < units.length - 1) {
+        value /= 1024;
+        unit++;
+    }
+    const digits = value < 10 && unit > 0 ? 1 : 0;
+    const formatted = `${value.toFixed(digits)}${units[unit]}`;
+    return formatted;
+}
+
+const formatShare = (bytes, size) => (bytes === null || !size ? "" : `${((bytes / size) * 100).toFixed(1)}%`);
+
+// Each head keeps its own color on every bar and in the table.
+const blobHeadColor = (head) => `hsl(${(parseInt(head, 16) || 0) * 22.5} 55% 55%)`;
+
+// The blob heads against the df filesystems they sit on: per partition, a bar
+// of its whole size split into its heads, what is not blobs, and what is free;
+// then a table of every head with the share of each partition it takes (or
+// would take, were it moved there), to see how heads could be shifted between
+// them. A partition df does not list gets no bar and no share.
+function renderBlobHeads({ measured, rows }, dfTable) {
+    const column = (label) => (dfTable ? dfTable.columns.findIndex((c) => c.label === label) : -1);
+    const [mount, size, used] = ["Mounted", "Size", "Used"].map(column);
+    const partitions = [...new Set(rows.map(({ partition }) => partition))].sort();
+    const filesystems = partitions.map((partition) => {
+        const row =
+            mount >= 0 ? dfTable.rows.find((r) => r[mount] === partition || r[mount].endsWith(`/${partition}`)) : null;
+        return {
+            partition,
+            size: row && size >= 0 ? parseDfSize(row[size]) : null,
+            used: row && used >= 0 ? parseDfSize(row[used]) : null,
+        };
+    });
+    const sizeOf = Object.fromEntries(filesystems.map(({ partition, size }) => [partition, size]));
+    const width = (bytes, total) => `${Math.max(0, Math.min(100, (bytes / total) * 100))}%`;
+
+    const bars = filesystems
+        .filter(({ size }) => size)
+        .map(({ partition, size, used: fsUsed }) => {
+            const heads = rows.filter((row) => row.partition === partition && row.bytes !== null);
+            const blobBytes = heads.reduce((sum, { bytes }) => sum + bytes, 0);
+            const other = fsUsed === null ? null : Math.max(0, fsUsed - blobBytes);
+            const free = Math.max(0, size - (fsUsed ?? blobBytes));
+            const segments = heads
+                .map(({ head, bytes }) => {
+                    const title = `Head ${head} on ${partition}: ${formatDfSize(bytes)}, ${formatShare(bytes, size)}`;
+                    return `<span class="blob-head-segment" style="width: ${width(bytes, size)}; background: ${blobHeadColor(head)}" title="${e(title)}">${e(head)}</span>`;
+                })
+                .join("");
+            const otherSegment = other
+                ? `<span class="blob-head-segment blob-head-other" style="width: ${width(other, size)}" title="${e(`Not blobs on ${partition}: ${formatDfSize(other)}, ${formatShare(other, size)}`)}"></span>`
+                : "";
+            const summary = [
+                `blobs ${formatDfSize(blobBytes)}`,
+                other === null ? null : `other ${formatDfSize(other)}`,
+                `free ${formatDfSize(free)}`,
+                `of ${formatDfSize(size)}`,
+            ]
+                .filter(Boolean)
+                .join(" · ");
+            return `<div class="blob-heads-row"><span class="disk-meter-name">${e(partition)}</span><span class="blob-heads-bar" role="img" aria-label="${e(`${partition}: ${summary}`)}">${segments}${otherSegment}</span><span class="disk-meter-text">${e(summary)}</span></div>`;
+        })
+        .join("");
+
+    const order = (a, b) => a.head.localeCompare(b.head) || a.partition.localeCompare(b.partition);
+    const shareHeaders = partitions.map((partition) => `<th scope="col" class="squeue-num">% of ${e(partition)}</th>`);
+    const head = `<th scope="col">Head</th><th scope="col">On</th><th scope="col" class="squeue-num">Used</th><th scope="col" class="squeue-num">Files</th>${shareHeaders.join("")}`;
+    const body = [...rows]
+        .sort(order)
+        .map(({ head: h, partition, bytes, files }) => {
+            const shares = partitions.map((p) => {
+                const share = formatShare(bytes, sizeOf[p]);
+                return `<td class="squeue-num${p === partition ? "" : " blob-heads-moved"}">${e(share)}</td>`;
+            });
+            return `<tr><td><span class="blob-head-swatch" style="background: ${blobHeadColor(h)}"></span>${e(h)}</td><td>${e(partition)}</td><td class="squeue-num">${e(formatDfSize(bytes))}</td><td class="squeue-num">${e(files === null ? "?" : files.toLocaleString("en-US"))}</td>${shares.join("")}</tr>`;
+        })
+        .join("");
+    const table = `<table class="squeue-table disk-table blob-heads-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+    const caption = renderDiskMetersCaption(BLOB_HEADS_TITLE, measured ? `measured ${measured}` : null);
+    const html = `<div class="blob-heads">${caption}${bars}${table}</div>`;
+    return html;
+}
+
 // The disk snapshot's screen, from each blank-line-separated block of its
 // output: the df table's filesystems and the quota report as meters (one grid,
 // so their bars line up), any other table (the du line when there was no
@@ -3424,16 +3547,24 @@ function renderDiskOutput(snapshot) {
     };
     const stdout = squeueScreenText(snapshot.stdout);
     const blocks = stdout ? stdout.split(/\n{2,}/) : [];
+    let dfTable = null;
+    const blobHeads = [];
     for (const block of blocks) {
         const quota = parseQuotaReport(block);
         if (quota) {
             meters += renderQuotaMeters(quota);
             continue;
         }
+        const heads = parseBlobHeads(block);
+        if (heads) {
+            blobHeads.push(heads);
+            continue;
+        }
         // A lone line (an error message) is text, not a header without rows.
         const table = block.includes("\n") ? parseSqueueTable(block) : null;
         const dfMeters = table ? renderDfMeters(table) : null;
         if (dfMeters) {
+            dfTable ??= table;
             meters += dfMeters;
             continue;
         }
@@ -3441,6 +3572,8 @@ function renderDiskOutput(snapshot) {
         html += table ? renderDiskTable(table) : `<pre class="squeue-text">${e(block)}</pre>`;
     }
     flushMeters();
+    // Drawn against the filesystems, wherever the block came in the output.
+    for (const heads of blobHeads) html += renderBlobHeads(heads, dfTable);
     const messages = [];
     const stderr = squeueScreenText(snapshot.stderr);
     if (stderr) messages.push(e(stderr));
@@ -8388,6 +8521,9 @@ document.addEventListener("DOMContentLoaded", init);
 
 if (typeof module !== "undefined" && module.exports) {
     module.exports = {
+        parseBlobHeads,
+        parseDfSize,
+        formatDfSize,
         applyFilter,
         commitSearch,
         compareVersionsDescending,
