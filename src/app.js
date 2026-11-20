@@ -3420,6 +3420,7 @@ function renderDiskTable({ columns, rows }) {
 // when `text` is not such a block.
 const BLOB_HEADS_TITLE = "Blob heads";
 const BLOB_HEADS_COLUMNS = ["Head", "Partition", "Bytes", "Files"];
+const BLOB_HEADS_MEASURED = "measured ";
 function parseBlobHeads(text) {
     const [title, ...lines] = String(text ?? "").split("\n");
     if (!title.startsWith(BLOB_HEADS_TITLE)) return null;
@@ -3432,8 +3433,9 @@ function parseBlobHeads(text) {
         const [head, partition, bytes, files] = indexes.map((index) => row[index]);
         return { head: head.toLowerCase(), partition, bytes: count(bytes), files: count(files) };
     });
-    const measuredMatch = /measured\s+(.+)$/.exec(title);
-    const blobHeads = { measured: measuredMatch ? measuredMatch[1].trim() : null, rows };
+    const measuredAt = title.indexOf(BLOB_HEADS_MEASURED);
+    const measured = measuredAt < 0 ? "" : title.slice(measuredAt + BLOB_HEADS_MEASURED.length).trim();
+    const blobHeads = { measured: measured || null, rows };
     return blobHeads;
 }
 

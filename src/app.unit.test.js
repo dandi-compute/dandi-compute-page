@@ -5166,6 +5166,8 @@ describe("live squeue monitor", () => {
                 { head: "f", partition: "002", bytes: null, files: null },
             ],
         });
+        // Without when it was measured, the block still reads.
+        expect(parseBlobHeads(BLOB_HEADS_STDOUT.replace(", measured 2026-11-05 02:58 EST", "")).measured).toBeNull();
         expect(parseBlobHeads(DISK_DF_STDOUT)).toBeNull();
         expect(parseBlobHeads("Blob heads, measured today\nnot a table at all")).toBeNull();
     });
