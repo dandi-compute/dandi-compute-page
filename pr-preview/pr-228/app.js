@@ -3174,7 +3174,19 @@ function renderSqueueOutput(snapshot) {
 // found, else what fetchLatestMonitorSnapshot returned; `error` is the message
 // of the last failed load, if it failed. `renderOutput` draws the snapshot's
 // screen and `renderChips` (optional) the chips in the bar.
-function renderMonitorFrame({ name, snapshot, error = null, now, staleAfterMs, renderOutput, renderChips = null }) {
+// `renderWithoutSnapshot`, when given, draws what the screen shows below the
+// error or "no snapshots" message (or while connecting): data of the widget's
+// own that does not come from the snapshot.
+function renderMonitorFrame({
+    name,
+    snapshot,
+    error = null,
+    now,
+    staleAfterMs,
+    renderOutput,
+    renderChips = null,
+    renderWithoutSnapshot = null,
+}) {
     let status;
     let meta = "";
     let body = "";
@@ -3206,6 +3218,7 @@ function renderMonitorFrame({ name, snapshot, error = null, now, staleAfterMs, r
     } else {
         status = renderSqueueStatus("connecting", "connecting");
     }
+    if (!snapshot && renderWithoutSnapshot) body += renderWithoutSnapshot();
 
     const chips = snapshot && renderChips ? renderChips(snapshot) : "";
     return `
@@ -3411,32 +3424,123 @@ function renderDiskTable({ columns, rows }) {
     return `<table class="squeue-table disk-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
 }
 
-// The space each blob head (the first hex digit of a content ID) takes on each
-// blob partition, as launcher/blob_heads.sh in dandi-compute-runner measures
-// it once a day: a "Blob heads, measured ..." line, then a table of Head,
-// Partition, Bytes and Files, one row per head and partition that holds any
-// of its blobs. { measured, rows: [{ head, partition, bytes, files }] }, with
-// `bytes` and `files` null when the measurement was cut short ("?"); null
-// when `text` is not such a block.
+// Which partition each blob head (the first hex digit of a content ID) belongs
+// on comes from simple-s3-backup's spec. What each head should take there comes
+// from its daily dashboard job: the head's size in the bucket, and how many of
+// its directories each partition holds (a listing, never a walk of the files).
+// So the section shows what usage should be and flags where practice differs.
+const PARTITIONS_SPEC_URL =
+    "https://raw.githubusercontent.com/dandi/simple-s3-backup/main/src/simple_s3_backup/partitions.json";
+const PARTITIONS_SPEC_SOURCE_URL =
+    "https://github.com/dandi/simple-s3-backup/blob/main/src/simple_s3_backup/partitions.json";
+const BLOB_HEADS_URL = "https://raw.githubusercontent.com/dandi/backup-status/main/data/blob_heads.json";
+const BLOB_HEADS_SOURCE_URL = "https://github.com/dandi/backup-status/blob/main/data/blob_heads.json";
 const BLOB_HEADS_TITLE = "Blob heads";
-const BLOB_HEADS_COLUMNS = ["Head", "Partition", "Bytes", "Files"];
-const BLOB_HEADS_MEASURED = "measured ";
-function parseBlobHeads(text) {
-    const [title, ...lines] = String(text ?? "").split("\n");
-    if (!title.startsWith(BLOB_HEADS_TITLE)) return null;
-    const table = parseSqueueTable(lines.join("\n"));
-    if (!table) return null;
-    const indexes = BLOB_HEADS_COLUMNS.map((label) => table.columns.findIndex((c) => c.label === label));
-    if (indexes.some((index) => index < 0)) return null;
-    const count = (cell) => (/^\d+$/.test(cell) ? Number(cell) : null);
-    const rows = table.rows.map((row) => {
-        const [head, partition, bytes, files] = indexes.map((index) => row[index]);
-        return { head: head.toLowerCase(), partition, bytes: count(bytes), files: count(files) };
+const HEX_DIGITS = "0123456789abcdef";
+const isBlobHead = (value) => typeof value === "string" && value.length === 1 && HEX_DIGITS.includes(value);
+const blobHeadCount = (value) => (Number.isFinite(value) && value >= 0 ? value : null);
+
+async function fetchBlobHeadsJson(url) {
+    const resp = await cachedFetch(url);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const json = await resp.json();
+    return json;
+}
+
+const isPartitionsSpec = (spec) =>
+    Array.isArray(spec?.partitions) && spec.partitions.length > 0 && !!spec.blobs && typeof spec.blobs === "object";
+const isBlobHeadsData = (data) => Array.isArray(data?.heads);
+
+// The spec and the per-head data as { spec, data }, or { error } naming what
+// could not be loaded. Never throws, so a failure stays inside the section.
+async function fetchBlobHeads() {
+    const [spec, data] = await Promise.allSettled([
+        fetchBlobHeadsJson(PARTITIONS_SPEC_URL),
+        fetchBlobHeadsJson(BLOB_HEADS_URL),
+    ]);
+    const why = (result, valid) =>
+        result.status === "rejected" ? result.reason?.message || String(result.reason) : valid ? null : "unreadable";
+    const failures = [
+        [why(spec, isPartitionsSpec(spec.value)), "partitions.json"],
+        [why(data, isBlobHeadsData(data.value)), "blob_heads.json"],
+    ]
+        .filter(([reason]) => reason)
+        .map(([reason, name]) => `${name} (${reason})`);
+    const loaded =
+        failures.length > 0
+            ? { error: `Could not load ${failures.join(" or ")}.` }
+            : { spec: spec.value, data: data.value, error: null };
+    return loaded;
+}
+
+// The size and use of each partition, from df when the disk snapshot lists it
+// (it is newer), else from blob_heads.json; then each head where the spec puts
+// it (or, for a head in `moved`, on the other partition) with what it takes in
+// the bucket and where its directories actually are.
+function planBlobHeads(spec, data, dfTable, moved = new Set()) {
+    const partitionNames = spec.partitions.map(String);
+    const measured = new Map(data.heads.filter((row) => isBlobHead(row?.head)).map((row) => [row.head, row]));
+    const heads = Object.keys(spec.blobs)
+        .filter(isBlobHead)
+        .sort()
+        .map((head) => {
+            const assigned = String(spec.blobs[head]);
+            const row = measured.get(head);
+            const subdirectories = row?.subdirectories ?? {};
+            const dirs = (partition) => blobHeadCount(subdirectories[partition]) ?? 0;
+            const target = partitionNames.find((partition) => partition !== assigned) ?? null;
+            const isMoved = target !== null && moved.has(head);
+            return {
+                head,
+                assigned,
+                measuredAs: typeof row?.partition === "string" ? row.partition : null,
+                bytes: blobHeadCount(row?.remote_bytes),
+                objects: blobHeadCount(row?.remote_objects),
+                measured: !!row,
+                missing: !!row && dirs(assigned) === 0,
+                strays: partitionNames
+                    .filter((partition) => partition !== assigned && dirs(partition) > 0)
+                    .map((partition) => ({ partition, dirs: dirs(partition) })),
+                target,
+                moved: isMoved,
+                projected: isMoved ? target : assigned,
+            };
+        });
+
+    const column = (label) => (dfTable ? dfTable.columns.findIndex((c) => c.label === label) : -1);
+    const [mount, sizeColumn, usedColumn] = ["Mounted", "Size", "Used"].map(column);
+    const sum = (list) => list.reduce((total, { bytes }) => total + (bytes ?? 0), 0);
+    const partitions = partitionNames.map((partition) => {
+        const row =
+            mount >= 0 ? dfTable.rows.find((r) => r[mount] === partition || r[mount].endsWith(`/${partition}`)) : null;
+        const reported = data.partitions?.[partition] ?? {};
+        const size =
+            (row && sizeColumn >= 0 ? parseDfSize(row[sizeColumn]) : null) ?? blobHeadCount(reported.size_bytes);
+        const used =
+            (row && usedColumn >= 0 ? parseDfSize(row[usedColumn]) : null) ?? blobHeadCount(reported.used_bytes);
+        const expected = sum(heads.filter((h) => h.assigned === partition));
+        const placed = heads.filter((h) => h.projected === partition);
+        const projected = sum(placed);
+        // What is not the spec's blobs (other files, stray copies) stays put when heads move.
+        const other = used === null ? null : Math.max(0, used - expected);
+        const unfinished = used !== null && expected > used ? expected - used : null;
+        const filled = projected + (other ?? 0);
+        return {
+            partition,
+            size,
+            used,
+            expected,
+            projected,
+            changed: heads.some((h) => h.moved && (h.assigned === partition || h.target === partition)),
+            heads: placed,
+            other,
+            unfinished,
+            free: size === null ? null : size - filled,
+            percent: size ? (filled / size) * 100 : null,
+        };
     });
-    const measuredAt = title.indexOf(BLOB_HEADS_MEASURED);
-    const measured = measuredAt < 0 ? "" : title.slice(measuredAt + BLOB_HEADS_MEASURED.length).trim();
-    const blobHeads = { measured: measured || null, rows };
-    return blobHeads;
+    const plan = { partitions, heads };
+    return plan;
 }
 
 // A size as `df -h` prints it ("968T", "1.5P", "0"), in bytes; null otherwise.
@@ -3468,79 +3572,160 @@ const formatShare = (bytes, size) => (bytes === null || !size ? "" : `${((bytes 
 // Each head keeps its own color on every bar and in the table.
 const blobHeadColor = (head) => `hsl(${(parseInt(head, 16) || 0) * 22.5} 55% 55%)`;
 
-// The blob heads against the df filesystems they sit on: per partition, a bar
-// of its whole size split into its heads, what is not blobs, and what is free;
-// then a table of every head with the share of each partition it takes (or
-// would take, were it moved there), to see how heads could be shifted between
-// them. A partition df does not list gets no bar and no share.
-function renderBlobHeads({ measured, rows }, dfTable) {
-    const column = (label) => (dfTable ? dfTable.columns.findIndex((c) => c.label === label) : -1);
-    const [mount, size, used] = ["Mounted", "Size", "Used"].map(column);
-    const partitions = [...new Set(rows.map(({ partition }) => partition))].sort();
-    const filesystems = partitions.map((partition) => {
-        const row =
-            mount >= 0 ? dfTable.rows.find((r) => r[mount] === partition || r[mount].endsWith(`/${partition}`)) : null;
-        return {
-            partition,
-            size: row && size >= 0 ? parseDfSize(row[size]) : null,
-            used: row && used >= 0 ? parseDfSize(row[used]) : null,
-        };
-    });
-    const sizeOf = Object.fromEntries(filesystems.map(({ partition, size }) => [partition, size]));
-    const width = (bytes, total) => `${Math.max(0, Math.min(100, (bytes / total) * 100))}%`;
+// A head's placement on disk against the spec, as a colored label.
+function renderBlobHeadPlacement({ measured, missing, strays }) {
+    if (!measured) return `<span class="disk-pct disk-pct-unknown">not measured</span>`;
+    const also = strays.map(({ partition, dirs }) => `also on ${partition} (${dirs} dir${dirs === 1 ? "" : "s"})`);
+    const [kind, label] = missing
+        ? ["critical", ["missing", ...also].join("; ")]
+        : also.length > 0
+          ? ["warn", `misplaced: ${also.join("; ")}`]
+          : ["ok", "ok"];
+    return `<span class="disk-pct disk-pct-${kind}">${e(label)}</span>`;
+}
 
-    const bars = filesystems
-        .filter(({ size }) => size)
-        .map(({ partition, size, used: fsUsed }) => {
-            const heads = rows.filter((row) => row.partition === partition && row.bytes !== null);
-            const blobBytes = heads.reduce((sum, { bytes }) => sum + bytes, 0);
-            const other = fsUsed === null ? null : Math.max(0, fsUsed - blobBytes);
-            const free = Math.max(0, size - (fsUsed ?? blobBytes));
-            const segments = heads
-                .map(({ head, bytes }) => {
-                    const title = `Head ${head} on ${partition}: ${formatDfSize(bytes)}, ${formatShare(bytes, size)}`;
-                    return `<span class="blob-head-segment" style="width: ${width(bytes, size)}; background: ${blobHeadColor(head)}" title="${e(title)}">${e(head)}</span>`;
-                })
-                .join("");
-            const otherSegment = other
-                ? `<span class="blob-head-segment blob-head-other" style="width: ${width(other, size)}" title="${e(`Not blobs on ${partition}: ${formatDfSize(other)}, ${formatShare(other, size)}`)}"></span>`
-                : "";
-            const summary = [
-                `blobs ${formatDfSize(blobBytes)}`,
-                other === null ? null : `other ${formatDfSize(other)}`,
-                `free ${formatDfSize(free)}`,
-                `of ${formatDfSize(size)}`,
-            ]
-                .filter(Boolean)
-                .join(" · ");
-            return `<div class="blob-heads-row"><span class="disk-meter-name">${e(partition)}</span><span class="blob-heads-bar" role="img" aria-label="${e(`${partition}: ${summary}`)}">${segments}${otherSegment}</span><span class="disk-meter-text">${e(summary)}</span></div>`;
-        })
-        .join("");
+// A head as a button that moves it to the other partition, or back.
+function renderBlobHeadToggle({ head, assigned, target, moved }, place, attributes, content) {
+    if (target === null) return `<span ${attributes}>${content}</span>`;
+    const action = moved ? `Move head ${head} back to ${assigned}` : `Move head ${head} to ${target}`;
+    return `<button type="button" ${attributes} data-blob-head="${e(head)}" data-blob-head-place="${place}" aria-pressed="${moved}" aria-label="${e(action)}">${content}</button>`;
+}
 
-    const order = (a, b) => a.head.localeCompare(b.head) || a.partition.localeCompare(b.partition);
-    const shareHeaders = partitions.map((partition) => `<th scope="col" class="squeue-num">% of ${e(partition)}</th>`);
-    const head = `<th scope="col">Head</th><th scope="col">On</th><th scope="col" class="squeue-num">Used</th><th scope="col" class="squeue-num">Files</th>${shareHeaders.join("")}`;
-    const body = [...rows]
-        .sort(order)
-        .map(({ head: h, partition, bytes, files }) => {
-            const shares = partitions.map((p) => {
-                const share = formatShare(bytes, sizeOf[p]);
-                return `<td class="squeue-num${p === partition ? "" : " blob-heads-moved"}">${e(share)}</td>`;
+function renderBlobHeadsBar(partition) {
+    const { partition: name, size, other, heads, unfinished, free, percent, changed } = partition;
+    const blobsLabel = changed ? "projected blobs" : "expected blobs";
+    const summary = [
+        `${blobsLabel} ${formatDfSize(partition.projected)}`,
+        other === null ? null : `other ${formatDfSize(other)}`,
+        free === null ? null : free < 0 ? `over by ${formatDfSize(-free)}` : `free ${formatDfSize(free)}`,
+        size === null ? "size unknown" : `of ${formatDfSize(size)}`,
+    ]
+        .filter(Boolean)
+        .join(" · ");
+    const percentCell = percent === null ? "" : renderUsePercent(`${Math.round(percent)}%`);
+    const note = unfinished
+        ? `<span class="blob-heads-unfinished">expected blobs exceed what df says is used by ${e(formatDfSize(unfinished))}: the backup has not finished</span>`
+        : "";
+    let bar = "";
+    if (size) {
+        const width = (bytes) => `${Math.max(0, Math.min(100, (bytes / size) * 100))}%`;
+        const segments = heads
+            .filter(({ bytes }) => bytes)
+            .map((h) => {
+                const title = `Head ${h.head}: ${formatDfSize(h.bytes)}, ${formatShare(h.bytes, size)} of ${name}${h.moved ? `, moved from ${h.assigned}` : ""}`;
+                const attributes = `class="blob-head-segment${h.moved ? " blob-head-moved" : ""}" style="width: ${width(h.bytes)}; background: ${blobHeadColor(h.head)}" title="${e(title)}"`;
+                return renderBlobHeadToggle(h, "bar", attributes, e(h.head));
+            })
+            .join("");
+        const otherSegment = other
+            ? `<span class="blob-head-segment blob-head-other" style="width: ${width(other)}" role="img" aria-label="${e(`other ${formatDfSize(other)}`)}" title="${e(`Not the spec's blobs on ${name}: ${formatDfSize(other)}, ${formatShare(other, size)}`)}"></span>`
+            : "";
+        const label = `${name}: ${summary}${percent === null ? "" : `, ${Math.round(percent)}% full`}`;
+        bar = `<span class="blob-heads-bar" role="group" aria-label="${e(label)}">${segments}${otherSegment}</span>`;
+    }
+    return `<div class="blob-heads-row${changed ? " blob-heads-row-changed" : ""}"><span class="disk-meter-name">${e(name)}</span>${bar}<span class="disk-meter-text">${e(summary)}</span>${percentCell}${note}</div>`;
+}
+
+function renderBlobHeadsTable({ partitions, heads }) {
+    const sizes = partitions.map(({ partition, size }) => ({ partition, size }));
+    const shareHeaders = sizes.map(({ partition }) => `<th scope="col" class="squeue-num">% of ${e(partition)}</th>`);
+    const header = `<th scope="col">Head</th><th scope="col">Assigned</th><th scope="col" class="squeue-num">Bucket size</th><th scope="col" class="squeue-num">Objects</th>${shareHeaders.join("")}<th scope="col">Placement</th>`;
+    const body = heads
+        .map((h) => {
+            const toggle = renderBlobHeadToggle(
+                h,
+                "row",
+                `class="blob-head-toggle${h.moved ? " blob-head-moved" : ""}"`,
+                `<span class="blob-head-swatch" style="background: ${blobHeadColor(h.head)}"></span>${e(h.head)}`
+            );
+            const notes = [];
+            if (h.moved) notes.push(`→ ${h.target}`);
+            if (h.measuredAs && h.measuredAs !== h.assigned) notes.push(`measured as ${h.measuredAs}`);
+            const assigned = `${e(h.assigned)}${notes.map((note) => ` <span class="blob-heads-note">${e(note)}</span>`).join("")}`;
+            const shares = sizes.map(({ partition, size }) => {
+                const share = formatShare(h.bytes, size);
+                return `<td class="squeue-num${partition === h.projected ? "" : " blob-heads-elsewhere"}">${e(share)}</td>`;
             });
-            return `<tr><td><span class="blob-head-swatch" style="background: ${blobHeadColor(h)}"></span>${e(h)}</td><td>${e(partition)}</td><td class="squeue-num">${e(formatDfSize(bytes))}</td><td class="squeue-num">${e(files === null ? "?" : files.toLocaleString("en-US"))}</td>${shares.join("")}</tr>`;
+            const objects = h.objects === null ? "?" : h.objects.toLocaleString("en-US");
+            return `<tr${h.moved ? ' class="blob-heads-moved-row"' : ""}><td>${toggle}</td><td>${assigned}</td><td class="squeue-num">${e(formatDfSize(h.bytes))}</td><td class="squeue-num">${e(objects)}</td>${shares.join("")}<td>${renderBlobHeadPlacement(h)}</td></tr>`;
         })
         .join("");
-    const table = `<table class="squeue-table disk-table blob-heads-table"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
-    const caption = renderDiskMetersCaption(BLOB_HEADS_TITLE, measured ? `measured ${measured}` : null);
-    const html = `<div class="blob-heads">${caption}${bars}${table}</div>`;
+    return `<div class="blob-heads-table-scroll"><table class="squeue-table disk-table blob-heads-table"><thead><tr>${header}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function formatBlobHeadsUpdated(updated) {
+    const time = Date.parse(updated);
+    if (!Number.isFinite(time)) return null;
+    const date = new Date(time);
+    const label = date.toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZoneName: "short",
+    });
+    return `<time datetime="${e(date.toISOString())}">updated ${e(label)}</time>`;
+}
+
+// The Blob heads section: per partition, a bar of its size split into the
+// heads the spec puts there (at their size in the bucket), what df says is
+// used beyond them, and what is free; then every head with its share of each
+// partition and whether its directories are where the spec says. Selecting a
+// head moves it to the other partition to plan a change, and reset undoes it.
+// `blobHeads` is undefined while loading, else what fetchBlobHeads returned.
+function renderBlobHeads(blobHeads, dfTable, moved = new Set()) {
+    const sources = `<a class="squeue-source" href="${e(PARTITIONS_SPEC_SOURCE_URL)}" target="_blank" rel="noopener">spec ↗</a> <a class="squeue-source" href="${e(BLOB_HEADS_SOURCE_URL)}" target="_blank" rel="noopener">sizes ↗</a>`;
+    const caption = (note) =>
+        `<div class="disk-meters-caption"><span>${e(BLOB_HEADS_TITLE)}</span><span class="disk-meters-note">${note}</span></div>`;
+    if (!blobHeads?.spec) {
+        const message = blobHeads?.error ?? "Loading the partitions spec and the bucket sizes…";
+        return `<div class="blob-heads">${caption(sources)}<p class="blob-heads-message">${e(message)}</p></div>`;
+    }
+    const plan = planBlobHeads(blobHeads.spec, blobHeads.data, dfTable, moved);
+    const movedCount = plan.heads.filter((h) => h.moved).length;
+    const reset =
+        movedCount > 0
+            ? `<button type="button" class="blob-heads-reset" data-blob-heads-reset>reset ${movedCount} moved head${movedCount === 1 ? "" : "s"}</button>`
+            : "";
+    const updated = formatBlobHeadsUpdated(blobHeads.data.updated);
+    const failed = blobHeads.error
+        ? `<span class="squeue-refresh-failed" title="${e(blobHeads.error)}">refresh failed</span>`
+        : "";
+    const note = [reset, updated, failed, sources].filter(Boolean).join(" ");
+    const hint = `<p class="blob-heads-hint">${movedCount > 0 ? "What-if: the bars show the moved heads (outlined) on their new partition." : "Select a head to see the partitions with it moved."}</p>`;
+    const bars = `<div class="blob-heads-bars">${plan.partitions.map(renderBlobHeadsBar).join("")}</div>`;
+    const html = `<div class="blob-heads">${caption(note)}${hint}${bars}${renderBlobHeadsTable(plan)}</div>`;
     return html;
+}
+
+// The heads moved on the Status page, kept only as long as the widget is.
+function createBlobHeadMoves() {
+    const moved = new Set();
+    // Toggles the head (or resets) a click landed on; returns the selector of
+    // the control to focus once redrawn, or null when the click was elsewhere.
+    function handleClick(event) {
+        const control = event.target?.closest?.("[data-blob-head], [data-blob-heads-reset]");
+        if (!control) return null;
+        if (control.hasAttribute("data-blob-heads-reset")) {
+            moved.clear();
+            return '[data-blob-head-place="row"]';
+        }
+        const head = control.getAttribute("data-blob-head");
+        const place = control.getAttribute("data-blob-head-place");
+        if (!isBlobHead(head) || (place !== "bar" && place !== "row")) return null;
+        if (moved.has(head)) moved.delete(head);
+        else moved.add(head);
+        return `[data-blob-head="${head}"][data-blob-head-place="${place}"]`;
+    }
+    return { moved, handleClick, reset: () => moved.clear() };
 }
 
 // The disk snapshot's screen, from each blank-line-separated block of its
 // output: the df table's filesystems and the quota report as meters (one grid,
 // so their bars line up), any other table (the du line when there was no
-// quota report) as a table, and anything else as plain text.
-function renderDiskOutput(snapshot) {
+// quota report) as a table, and anything else as plain text. Then the Blob
+// heads section, drawn against the df table's filesystems.
+function renderDiskOutput(snapshot, blobHeads = undefined, movedHeads = new Set()) {
     let html = "";
     let meters = "";
     const flushMeters = () => {
@@ -3550,16 +3735,10 @@ function renderDiskOutput(snapshot) {
     const stdout = squeueScreenText(snapshot.stdout);
     const blocks = stdout ? stdout.split(/\n{2,}/) : [];
     let dfTable = null;
-    const blobHeads = [];
     for (const block of blocks) {
         const quota = parseQuotaReport(block);
         if (quota) {
             meters += renderQuotaMeters(quota);
-            continue;
-        }
-        const heads = parseBlobHeads(block);
-        if (heads) {
-            blobHeads.push(heads);
             continue;
         }
         // A lone line (an error message) is text, not a header without rows.
@@ -3574,8 +3753,7 @@ function renderDiskOutput(snapshot) {
         html += table ? renderDiskTable(table) : `<pre class="squeue-text">${e(block)}</pre>`;
     }
     flushMeters();
-    // Drawn against the filesystems, wherever the block came in the output.
-    for (const heads of blobHeads) html += renderBlobHeads(heads, dfTable);
+    html += renderBlobHeads(blobHeads, dfTable, movedHeads);
     const messages = [];
     const stderr = squeueScreenText(snapshot.stderr);
     if (stderr) messages.push(e(stderr));
@@ -3636,15 +3814,20 @@ function renderDiskChips(snapshot) {
     return chips.length > 0 ? `<span class="squeue-tally">${chips.join("")}</span>` : "";
 }
 
-function renderDiskMonitor({ snapshot, error = null } = {}, now = Date.now()) {
+// `extra` is the Blob heads section's data (see fetchBlobHeads) and
+// `movedHeads` the heads moved to plan a change.
+function renderDiskMonitor({ snapshot, error = null, extra = undefined } = {}, now = Date.now(), { movedHeads } = {}) {
     return renderMonitorFrame({
         name: "disk",
         snapshot,
         error,
         now,
         staleAfterMs: DISK_STALE_AFTER_MS,
-        renderOutput: renderDiskOutput,
+        renderOutput: (shown) => renderDiskOutput(shown, extra, movedHeads),
         renderChips: renderDiskChips,
+        // The Blob heads section does not depend on the disk snapshot, so it
+        // is shown (against blob_heads.json's partitions) without one too.
+        renderWithoutSnapshot: () => renderBlobHeads(extra, null, movedHeads),
     });
 }
 
@@ -3654,16 +3837,30 @@ function renderDiskMonitor({ snapshot, error = null } = {}, now = Date.now()) {
 // is shown again. `init(options)` mounts it (once) and starts polling;
 // `options.container` is the element it is mounted in (default: the top of
 // the page content) and the rest is passed to `render`. A failed load keeps
-// the last snapshot on screen and says the refresh failed.
-function createMonitorWidget({ kind, name, elementId, ariaLabel, render, pollIntervalMs }) {
-    let state = { snapshot: undefined, error: null };
+// the last snapshot on screen and says the refresh failed. `extra`, when
+// given, adds data of its own: `load()` (which never throws) runs alongside
+// each snapshot load into `state.extra`, keeping its last good result if a
+// later load fails; `handleClick(event)` returns the selector of the control
+// to focus once redrawn, or null to ignore the click; `reset()` runs on stop.
+function createMonitorWidget({ kind, name, elementId, ariaLabel, render, pollIntervalMs, extra = null }) {
+    let state = { snapshot: undefined, error: null, extra: undefined };
     let options = {};
     let refreshing = null; // the load in flight, so polls never overlap
     let timer = null;
+    const listening = new WeakSet();
+
+    function onClick(event) {
+        const focus = extra.handleClick(event);
+        if (focus === null) return;
+        draw()?.querySelector(focus)?.focus();
+    }
 
     function mount() {
         let el = document.getElementById(elementId);
-        if (el) return el;
+        if (el) {
+            listen(el);
+            return el;
+        }
         const container = options.container ?? document.querySelector(".page-content");
         if (!container) return null;
         el = document.createElement("section");
@@ -3671,7 +3868,14 @@ function createMonitorWidget({ kind, name, elementId, ariaLabel, render, pollInt
         el.className = "squeue-monitor";
         el.setAttribute("aria-label", ariaLabel);
         container.insertBefore(el, options.container ? null : container.firstChild);
+        listen(el);
         return el;
+    }
+
+    function listen(el) {
+        if (!extra?.handleClick || listening.has(el)) return;
+        listening.add(el);
+        el.addEventListener("click", onClick);
     }
 
     function draw() {
@@ -3683,14 +3887,18 @@ function createMonitorWidget({ kind, name, elementId, ariaLabel, render, pollInt
     function refresh() {
         if (refreshing) return refreshing;
         refreshing = (async () => {
+            const extraLoad = extra ? extra.load() : Promise.resolve(undefined);
             try {
-                state = { snapshot: await fetchLatestMonitorSnapshot(kind), error: null };
+                state = { ...state, snapshot: await fetchLatestMonitorSnapshot(kind), error: null };
             } catch (err) {
                 state = {
-                    snapshot: state.snapshot,
+                    ...state,
                     error: `Could not load the latest ${name} snapshot: ${err.message || err}`,
                 };
             }
+            const loaded = await extraLoad;
+            if (extra)
+                state.extra = loaded?.error && state.extra?.spec ? { ...state.extra, error: loaded.error } : loaded;
             draw();
         })().finally(() => {
             refreshing = null;
@@ -3719,8 +3927,9 @@ function createMonitorWidget({ kind, name, elementId, ariaLabel, render, pollInt
         if (timer !== null) clearInterval(timer);
         timer = null;
         document.removeEventListener("visibilitychange", onVisibilityChange);
-        state = { snapshot: undefined, error: null };
+        state = { snapshot: undefined, error: null, extra: undefined };
         options = {};
+        extra?.reset?.();
     }
 
     return { init, refresh, stop };
@@ -3734,13 +3943,15 @@ const squeueMonitor = createMonitorWidget({
     render: renderSqueueMonitor,
     pollIntervalMs: SQUEUE_POLL_INTERVAL_MS,
 });
+const blobHeadMoves = createBlobHeadMoves();
 const diskMonitor = createMonitorWidget({
     kind: DISK_KIND,
     name: "disk",
     elementId: "disk-monitor",
     ariaLabel: "Latest disk usage snapshot from MIT Engaging",
-    render: renderDiskMonitor,
+    render: (state, now, options) => renderDiskMonitor(state, now, { ...options, movedHeads: blobHeadMoves.moved }),
     pollIntervalMs: DISK_POLL_INTERVAL_MS,
+    extra: { load: fetchBlobHeads, ...blobHeadMoves },
 });
 
 // `hiddenJobNames` are left out of what the squeue monitor shows.
@@ -8523,9 +8734,14 @@ document.addEventListener("DOMContentLoaded", init);
 
 if (typeof module !== "undefined" && module.exports) {
     module.exports = {
-        parseBlobHeads,
         parseDfSize,
         formatDfSize,
+        parseSqueueTable,
+        planBlobHeads,
+        renderBlobHeads,
+        createBlobHeadMoves,
+        PARTITIONS_SPEC_URL,
+        BLOB_HEADS_URL,
         applyFilter,
         commitSearch,
         compareVersionsDescending,
