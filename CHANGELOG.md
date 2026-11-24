@@ -4,6 +4,7 @@
 
 ### 🚀 Enhancement
 
+- Added a scheduling panel under the Status page's SLURM queue that counts pending jobs per reason, meters running jobs against each QOS's per-user caps, and shows each pending job's priority breakdown, the fair-share factor and the partition and QOS limits. ([#230](https://github.com/dandi-compute/dandi-compute-page/pull/230))
 - Added a tag naming each job's pipeline to its card, which filters the dashboard to that pipeline when clicked. ([#223](https://github.com/dandi-compute/dandi-compute-page/pull/223))
 - Replaced the dashboard's filter inputs with a single search bar of `key:value` terms and free text that filters as you type, whose suggestions only offer values that jobs in view have. ([#223](https://github.com/dandi-compute/dandi-compute-page/pull/223))
 - Added version ranges to the search's `version:` and `codebase:` keys, such as `version:<1.5` or `version:>=1.3 version:<1.5`. ([#223](https://github.com/dandi-compute/dandi-compute-page/pull/223))
