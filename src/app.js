@@ -3,7 +3,7 @@
    TODO: once this project migrates to TS + Vite, source this from
    package.json directly (e.g. via Vite's `define`) instead of duplicating
    it here. */
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.6.0";
 const OWNER = "dandi-compute";
 const REPO = "001697";
 const BRANCH = "draft";
@@ -2852,6 +2852,14 @@ const SQUEUE_STALE_AFTER_MS = 15 * 60 * 1000;
    Status page. */
 const SQUEUE_KIND = "monitor";
 const DISK_KIND = "disk";
+/* Tables launcher/monitor.sh leaves beside the squeue snapshot, each
+   "|"-separated with a header line: sprio's breakdown of every pending job's
+   priority, this user's sshare fair-share, and the limits of the partitions
+   and QOS the jobs run under (two tables, a blank line between them).
+   Snapshots older than these files, or whose command failed, lack them. */
+const MONITOR_EXTRA_FILES = {
+    [SQUEUE_KIND]: ["priority.txt", "fairshare.txt", "limits.txt"],
+};
 const DISK_POLL_INTERVAL_MS = 5 * 60 * 1000;
 // Three missed 30-minute snapshots mark the view stale.
 const DISK_STALE_AFTER_MS = 90 * 60 * 1000;
@@ -2992,12 +3000,14 @@ async function fetchLatestMonitorSnapshot(kind, now = new Date()) {
 
     const { branch, recordName } = found;
     const directory = `${kind}/${recordName}`;
-    const [stdout, stderr, exitStatus] = await Promise.all([
+    const extraNames = MONITOR_EXTRA_FILES[kind] ?? [];
+    const [stdout, stderr, exitStatus, ...extras] = await Promise.all([
         fetchGlobalLogsText(branch, `${directory}/stdout`),
         fetchGlobalLogsText(branch, `${directory}/stderr`).catch(() => null),
         fetchGlobalLogsText(branch, `${directory}/exit_status`).catch(() => null),
+        ...extraNames.map((fileName) => fetchGlobalLogsText(branch, `${directory}/${fileName}`).catch(() => null)),
     ]);
-    return {
+    const snapshot = {
         branch,
         recordName,
         takenAt: monitorRecordTime(recordName),
@@ -3006,6 +3016,8 @@ async function fetchLatestMonitorSnapshot(kind, now = new Date()) {
         exitStatus: exitStatus?.trim() || null,
         sourceUrl: `${GLOBAL_LOGS_REPO_URL}/blob/${branch}/${directory}/stdout`,
     };
+    if (extraNames.length > 0) snapshot.files = Object.fromEntries(extraNames.map((n, i) => [n, extras[i]]));
+    return snapshot;
 }
 
 const fetchLatestSqueueSnapshot = (now = new Date()) => fetchLatestMonitorSnapshot(SQUEUE_KIND, now);
@@ -3232,10 +3244,15 @@ function renderMonitorFrame({
 }
 
 // The squeue monitor. Jobs named in `hiddenJobNames` are left out of the
-// table and the tally.
-function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now(), { hiddenJobNames = null } = {}) {
+// table and the tally. With `scheduling`, the scheduling panel follows the
+// terminal (see renderSchedulingPanel).
+function renderSqueueMonitor(
+    { snapshot, error = null } = {},
+    now = Date.now(),
+    { hiddenJobNames = null, scheduling = false } = {}
+) {
     if (snapshot && hiddenJobNames) snapshot = { ...snapshot, stdout: hideSqueueJobs(snapshot.stdout, hiddenJobNames) };
-    return renderMonitorFrame({
+    const frame = renderMonitorFrame({
         name: "squeue",
         snapshot,
         error,
@@ -3244,6 +3261,336 @@ function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now(), 
         renderOutput: renderSqueueOutput,
         renderChips: (shown) => renderSqueueTally(shown.stdout),
     });
+    const panel = scheduling && snapshot ? renderSchedulingPanel(snapshot) : "";
+    return frame + panel;
+}
+
+/* ─── Scheduling panel (the Status page, under the squeue terminal) ── */
+/* Why pending jobs wait, read from the squeue snapshot and the tables
+   launcher/monitor.sh records beside it: the reasons the jobs are pending
+   for, what the running jobs hold against each partition's per-user caps,
+   the parts each pending job's priority adds up to and this user's
+   fair-share, and the limits themselves. */
+
+// What SLURM's pending reasons mean, for the chips' tooltips.
+const SLURM_PENDING_REASONS = {
+    Priority: "Waiting behind jobs of higher priority.",
+    Resources: "Next in line, waiting for nodes to free up.",
+    Dependency: "Waiting for a job it depends on to finish.",
+    DependencyNeverSatisfied: "A job it depends on failed, so it can never start.",
+    BeginTime: "Not allowed to start before its begin time.",
+    JobArrayTaskLimit: "The array's own throttle (the %N in its ID) is reached.",
+    ReqNodeNotAvail: "The nodes it needs are down, drained or reserved.",
+    PartitionTimeLimit: "It asks for more time than the partition allows.",
+    QOSMaxMemoryPerUser: "This user's running jobs already hold the most memory the QOS allows one user.",
+    QOSMaxCpuPerUserLimit: "This user's running jobs already hold the most CPUs the QOS allows one user.",
+    QOSMaxGRESPerUser: "This user's running jobs already hold the most GPUs the QOS allows one user.",
+    QOSMaxJobsPerUserLimit: "This user already runs as many jobs as the QOS allows.",
+    QOSMaxSubmitJobPerUserLimit: "This user already has as many jobs queued as the QOS allows.",
+    QOSMaxNodePerUserLimit: "This user's running jobs already use the most nodes the QOS allows one user.",
+    QOSGrpMemLimit: "Every user of the QOS together already holds its memory limit.",
+    QOSGrpCpuLimit: "Every user of the QOS together already holds its CPU limit.",
+    AssocGrpCpuLimit: "The account already holds its CPU limit.",
+    AssocGrpMemLimit: "The account already holds its memory limit.",
+    AssocMaxJobsLimit: "The account already runs as many jobs as it may.",
+};
+
+// The reason inside a pending job's "(...)" cell, without what follows a comma
+// (ReqNodeNotAvail lists the nodes). Null for a running job's node list.
+function pendingReason(cell) {
+    const text = String(cell ?? "").trim();
+    if (!text.startsWith("(")) return null;
+    const inner = text.slice(1, text.endsWith(")") ? -1 : undefined);
+    const reason = inner.split(",")[0].trim();
+    return reason || null;
+}
+
+// A size as squeue and sacctmgr print it ("256G", "4000M", "1.5T", "512")
+// in GB. A bare number is MB, SLURM's unit. Null when it is not a size.
+function parseSlurmMemoryGb(value) {
+    const match = /^(\d+(?:\.\d+)?)([KMGTP]?)$/i.exec(String(value ?? "").trim());
+    if (!match) return null;
+    const scale = { K: 1 / (1024 * 1024), M: 1 / 1024, G: 1, T: 1024, P: 1024 * 1024 }[match[2].toUpperCase() || "M"];
+    return Number(match[1]) * scale;
+}
+
+function formatGb(gb) {
+    if (gb >= 1024) return `${Number((gb / 1024).toFixed(1))} TB`;
+    return `${Number(gb.toFixed(gb < 10 ? 1 : 0))} GB`;
+}
+
+// A TRES list ("cpu=512,mem=4000G,gres/gpu=8") as { cpu, memGb, gpu, ... }
+// for the parts this page reads. Empty for an empty list.
+function parseTres(text) {
+    const tres = {};
+    for (const part of String(text ?? "").split(",")) {
+        const [name, value] = part.split("=");
+        if (!name || value === undefined) continue;
+        if (name === "mem") {
+            const gb = parseSlurmMemoryGb(value);
+            if (gb !== null) tres.memGb = gb;
+        } else if (name === "cpu") tres.cpu = Number(value);
+        else if (name === "gres/gpu") tres.gpu = Number(value);
+        else if (name === "node") tres.node = Number(value);
+    }
+    return tres;
+}
+
+// "|"-separated tables, separated by blank lines, each with a header line.
+// A column is numeric when every one of its non-empty cells is a number.
+function parsePipeTables(text) {
+    const tables = [];
+    for (const block of String(text ?? "").split(/\n\s*\n/)) {
+        const lines = block.split("\n").filter((line) => line.trim() !== "");
+        if (lines.length < 2 || !lines[0].includes("|")) continue;
+        const labels = lines[0].split("|").map((cell) => cell.trim());
+        const rows = lines.slice(1).map((line) => {
+            const cells = line.split("|").map((cell) => cell.trim());
+            return labels.map((_, index) => cells[index] ?? "");
+        });
+        const columns = labels.map((label, index) => ({
+            label,
+            right:
+                rows.some((row) => row[index] !== "") &&
+                rows.every((row) => row[index] === "" || /^-?\d+(\.\d+)?$/.test(row[index])),
+        }));
+        tables.push({ columns, rows });
+    }
+    return tables;
+}
+
+// A parsed table's rows as objects keyed by upper-cased column label.
+function tableRecords({ columns, rows }) {
+    return rows.map((row) => Object.fromEntries(columns.map(({ label }, index) => [label.toUpperCase(), row[index]])));
+}
+
+// The squeue snapshot's rows as { partition, state, cpus, memGb, qos, reason }.
+// Memory is MIN_MEMORY per node times the nodes, or per CPU ("4000Mc") times
+// the CPUs. Null when the snapshot does not parse as squeue's table.
+function squeueJobs(stdout) {
+    const text = squeueScreenText(stdout ?? "");
+    const table = text ? parseSqueueTable(text) : null;
+    if (!table) return null;
+    const column = (test) => table.columns.findIndex(({ label }) => test(label));
+    const at = {
+        partition: column((l) => l === "PARTITION"),
+        state: column((l) => l === "ST" || l === "STATE"),
+        nodes: column((l) => l === "NODES"),
+        // squeue cuts the header to the field's width, so %.2C is headed "CP".
+        cpus: column((l) => l === "CPUS" || l === "CP"),
+        memory: column((l) => l === "MIN_MEMORY"),
+        qos: column((l) => l === "QOS"),
+        reason: column((l) => l.startsWith("NODELIST")),
+    };
+    return table.rows.map((row) => {
+        const cell = (key) => (at[key] >= 0 ? row[at[key]] : "");
+        const nodes = Number(cell("nodes")) || 1;
+        const cpus = Number(cell("cpus")) || 0;
+        const memoryCell = cell("memory");
+        const perCpu = /c$/i.test(memoryCell);
+        const memory = parseSlurmMemoryGb(perCpu ? memoryCell.slice(0, -1) : memoryCell);
+        return {
+            partition: cell("partition"),
+            state: cell("state"),
+            cpus,
+            memGb: memory === null ? null : memory * (perCpu ? cpus : nodes),
+            qos: cell("qos"),
+            reason: cell("state") === "PD" ? pendingReason(cell("reason")) : null,
+        };
+    });
+}
+
+// Pending rows per reason, most first. A pending job array is one row.
+function summarizePendingReasons(jobs) {
+    const counts = new Map();
+    for (const job of jobs ?? []) {
+        if (job.state !== "PD") continue;
+        const reason = job.reason ?? "unknown";
+        counts.set(reason, (counts.get(reason) ?? 0) + 1);
+    }
+    return [...counts].sort(([a, x], [b, y]) => y - x || a.localeCompare(b));
+}
+
+// limits.txt as { partitions: Map(name → record), qos: Map(name → record) }.
+function parseLimits(text) {
+    const partitions = new Map();
+    const qos = new Map();
+    for (const table of parsePipeTables(text)) {
+        for (const record of tableRecords(table)) {
+            if (record.PARTITION) partitions.set(record.PARTITION, record);
+            else if (record.NAME) qos.set(record.NAME, record);
+        }
+    }
+    return { partitions, qos };
+}
+
+// Per QOS with a per-user cap (MaxTRESPU), what this user's running jobs hold
+// against it and what the pending ones ask for. SLURM counts a job against its
+// own QOS and against its partition's QOS, across every partition, so a job
+// is counted under each of the two that has a cap. Then the partitions with
+// jobs under no capped QOS. { capped: [{ qos, partitions, caps, used, asked }],
+// uncapped: [{ partition, used, asked }] }, where caps, used and asked are
+// { memGb, cpu }.
+function qosUsage(jobs, limits) {
+    const capOf = (name) => {
+        const tres = parseTres(limits.qos.get(name)?.MAXTRESPU);
+        return "memGb" in tres || "cpu" in tres ? tres : null;
+    };
+    const governing = (job) =>
+        [job.qos, limits.partitions.get(job.partition)?.QOS].filter(
+            (name, index, all) => name && name !== "N/A" && all.indexOf(name) === index && capOf(name)
+        );
+    const empty = () => ({ memGb: 0, cpu: 0 });
+    const add = (totals, job) => {
+        totals.memGb += job.memGb ?? 0;
+        totals.cpu += job.cpus ?? 0;
+    };
+    const capped = new Map();
+    const uncapped = new Map();
+    for (const job of jobs) {
+        if (job.state !== "R" && job.state !== "PD") continue;
+        const names = governing(job);
+        const targets = names.length > 0 ? names.map((name) => ["qos", name]) : [["partition", job.partition]];
+        for (const [type, name] of targets) {
+            const into = type === "qos" ? capped : uncapped;
+            if (!into.has(name)) into.set(name, { partitions: new Set(), used: empty(), asked: empty() });
+            const entry = into.get(name);
+            entry.partitions.add(job.partition);
+            add(job.state === "R" ? entry.used : entry.asked, job);
+        }
+    }
+    const byName = ([a], [b]) => a.localeCompare(b);
+    return {
+        capped: [...capped].sort(byName).map(([qos, { partitions, used, asked }]) => ({
+            qos,
+            partitions: [...partitions].filter(Boolean).sort(),
+            caps: capOf(qos),
+            used,
+            asked,
+        })),
+        uncapped: [...uncapped]
+            .sort(byName)
+            .filter(([partition]) => partition)
+            .map(([partition, { used, asked }]) => ({ partition, used, asked })),
+    };
+}
+
+function percentCell(used, cap) {
+    return cap > 0 ? `${Math.round((100 * used) / cap)}%` : "";
+}
+
+// Memory and CPUs held by running jobs against each QOS's per-user caps, with
+// what the pending jobs ask for in the tooltip; then the partitions whose jobs
+// no recorded cap holds.
+function renderQosUsage(jobs, limits) {
+    const { capped, uncapped } = qosUsage(jobs, limits);
+    const pendingNote = (asked, format) =>
+        asked > 0 ? `Pending jobs ask for ${format(asked)} more.` : "Nothing pending.";
+    const parts = [
+        { key: "memGb", kind: "memory", format: formatGb },
+        { key: "cpu", kind: "CPUs", format: (n) => String(n) },
+    ];
+    let meters = "";
+    for (const { qos, partitions, caps, used, asked } of capped) {
+        parts.forEach(({ key, kind, format }, index) => {
+            const cap = caps[key];
+            meters += renderDiskMeter({
+                name: `QOS ${qos}`,
+                kind,
+                continued: index > 0,
+                percentCell: cap ? percentCell(used[key], cap) : "",
+                text: cap ? `${format(used[key])} / ${format(cap)}` : `${format(used[key])} / no cap`,
+                title: `${pendingNote(asked[key], format)} Jobs in ${partitions.join(", ") || "no partition"}.`,
+            });
+        });
+    }
+    for (const { partition, used, asked } of uncapped) {
+        parts.forEach(({ key, kind, format }, index) => {
+            meters += renderDiskMeter({
+                name: partition,
+                kind,
+                continued: index > 0,
+                percentCell: "",
+                text: `${format(used[key])} / no per-user cap recorded`,
+                title: pendingNote(asked[key], format),
+            });
+        });
+    }
+    if (!meters) return "";
+    const note = limits.qos.size > 0 ? null : "caps not recorded in this snapshot";
+    return `<div class="disk-meters">${renderDiskMetersCaption("Running against per-user caps", note)}${meters}</div>`;
+}
+
+function renderPipeTable({ columns, rows }, className = "") {
+    const numeric = (column) => (column.right ? ' class="squeue-num"' : "");
+    const head = columns.map((column) => `<th scope="col"${numeric(column)}>${e(column.label)}</th>`).join("");
+    const body = rows
+        .map((row) => `<tr>${row.map((cell, index) => `<td${numeric(columns[index])}>${e(cell)}</td>`).join("")}</tr>`)
+        .join("");
+    return `<table class="squeue-table sched-table${className ? ` ${className}` : ""}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderPendingReasons(reasons) {
+    if (reasons.length === 0) return `<p class="sched-note">Nothing is pending.</p>`;
+    const chips = reasons
+        .map(([reason, count]) => {
+            const meaning = SLURM_PENDING_REASONS[reason] ?? "See SLURM's squeue documentation for this reason.";
+            return `<span class="sched-reason" title="${e(meaning)}">${e(reason)} <span class="sched-count">${count}</span></span>`;
+        })
+        .join("");
+    return `<div class="sched-reasons">${chips}</div>`;
+}
+
+// The fair-share line: this user's row of sshare (the one with a user).
+function renderFairShare(text) {
+    const table = parsePipeTables(text)[0];
+    const record = table ? (tableRecords(table).find((row) => row.USER) ?? tableRecords(table)[0]) : null;
+    if (!record) return "";
+    const facts = [
+        ["Fair-share factor", record.FAIRSHARE],
+        ["Effective usage", record.EFFECTVUSAGE],
+        ["Normalized shares", record.NORMSHARES],
+        ["Account", record.ACCOUNT],
+    ].filter(([, value]) => value);
+    if (facts.length === 0) return "";
+    const items = facts
+        .map(
+            ([label, value]) =>
+                `<span class="sched-fact"><span class="sched-fact-label">${e(label)}</span> ${e(value)}</span>`
+        )
+        .join("");
+    return `<div class="sched-facts" title="From sshare. A fair-share factor near 1 means little recent usage against the account's share; near 0, a lot.">${items}</div>`;
+}
+
+const renderSchedulingCaption = (title, note = null) =>
+    `<div class="sched-caption"><span>${e(title)}</span>${note ? `<span class="sched-caption-note">${e(note)}</span>` : ""}</div>`;
+
+function renderSchedulingPanel(snapshot) {
+    const jobs = squeueJobs(snapshot.stdout);
+    if (!jobs) return "";
+    const files = snapshot.files ?? {};
+    const limits = parseLimits(files["limits.txt"]);
+    let html = renderSchedulingCaption("Why jobs are pending");
+    html += renderPendingReasons(summarizePendingReasons(jobs));
+    html += renderQosUsage(jobs, limits);
+
+    const priority = parsePipeTables(files["priority.txt"])[0];
+    const fairShare = renderFairShare(files["fairshare.txt"]);
+    if (priority || fairShare) {
+        html += renderSchedulingCaption(
+            "Priority of pending jobs",
+            "sprio: the weighted parts each job's priority adds up to"
+        );
+        html += fairShare;
+        if (priority) html += renderPipeTable(priority);
+    }
+    if (limits.partitions.size > 0 || limits.qos.size > 0) {
+        const tables = parsePipeTables(files["limits.txt"])
+            .map((table) => renderPipeTable(table))
+            .join("");
+        html += `<details class="sched-limits"><summary>Partition and QOS limits</summary>${tables}</details>`;
+    }
+    return `<div class="sched-panel" aria-label="Scheduling details">${html}</div>`;
 }
 
 /* ─── Disk usage monitor (the Status page) ──────────────────── */
@@ -8656,7 +9003,7 @@ async function init() {
         // Nothing else to load: the monitors are the page.
         document.getElementById("runs").innerHTML = renderStatusPage();
         showDiffResults();
-        initSqueueMonitor({ container: document.getElementById("status-queue") });
+        initSqueueMonitor({ container: document.getElementById("status-queue"), scheduling: true });
         initQueuePriorities();
         initDiskMonitor({ container: document.getElementById("status-disk") });
         return;
@@ -8793,6 +9140,14 @@ if (typeof module !== "undefined" && module.exports) {
         refreshDiskMonitor,
         renderSqueueMonitor,
         renderDiskMonitor,
+        renderSchedulingPanel,
+        parsePipeTables,
+        parseSlurmMemoryGb,
+        parseTres,
+        squeueJobs,
+        summarizePendingReasons,
+        qosUsage,
+        parseLimits,
         renderStatusPage,
         stopMonitors,
         summarizeSqueueJobs,
