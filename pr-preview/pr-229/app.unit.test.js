@@ -2381,6 +2381,18 @@ describe("partitionQcPlots", () => {
         expect(qc.metrics[0].plot.url).toBe(`https://x/${expectedBlob}`);
         expect(remaining).toBeNull();
     });
+
+    it("falls back to the plot in the group named after the probe when no plot sits at the reference's path", () => {
+        const vizData = [
+            { name: "ProbeA", images: [{ name: "drift_map.png", url: "https://x/aaaaaa111111" }] },
+            { name: "ProbeB", images: [{ name: "drift_map.png", url: "https://x/bbbbbb222222" }] },
+        ];
+        const qc = { metrics: [{ name: "Drift map", reference: "quality_control/ProbeB/drift_map.png" }] };
+
+        partitionQcPlots(qc, vizData);
+
+        expect(qc.metrics[0].plot.url).toBe("https://x/bbbbbb222222");
+    });
 });
 
 describe("fetchSlurmLogs", () => {
