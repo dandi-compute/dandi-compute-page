@@ -54,6 +54,7 @@ const {
     niceCeiling,
     renderHistoryCharts,
     renderQueueHistory,
+    initQueueHistory,
     parsePipeTables,
     parseSlurmMemoryGb,
     parseTres,
@@ -6073,12 +6074,68 @@ describe("queue history", () => {
         expect(titles).toHaveLength(2);
     });
 
+    it("loads the history, switches ranges and reads out the snapshot under the pointer", async () => {
+        const day = (date) =>
+            [line(`${date}T13:00:01`), line(`${date}T13:05:01`, { pending: { Priority: 4 } })].join("\n");
+        global.fetch = vi.fn(async (url) => {
+            const match = /history\/(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(url);
+            return match ? new Response(day(match[1])) : new Response("", { status: 404 });
+        });
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(NOW);
+        const container = document.createElement("div");
+        document.body.appendChild(container);
+        try {
+            await initQueueHistory({ container });
+            const section = container.querySelector("#queue-history");
+            expect(section.querySelectorAll(".history-chart").length).toBeGreaterThan(0);
+            expect(global.fetch).toHaveBeenCalledTimes(8);
+
+            section.querySelector('[data-history-range="1"]').dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            expect(section.querySelector(".squeue-status").textContent).toBe("loading");
+            await vi.waitFor(() => expect(section.querySelector(".history-chart")).not.toBeNull());
+            expect(section.querySelector('[data-history-range="1"]').getAttribute("aria-pressed")).toBe("true");
+
+            const plot = section.querySelector(".history-chart");
+            plot.querySelector("svg").dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 0 }));
+            const tooltip = plot.querySelector(".history-tooltip");
+            expect(tooltip.hidden).toBe(false);
+            expect(tooltip.querySelectorAll(".history-tooltip-row").length).toBeGreaterThan(0);
+            expect(plot.querySelector(".history-crosshair").getAttribute("visibility")).toBe("visible");
+            plot.querySelector("svg").dispatchEvent(new MouseEvent("pointerleave", { bubbles: true }));
+            section.dispatchEvent(new MouseEvent("pointerleave"));
+            expect(tooltip.hidden).toBe(true);
+        } finally {
+            stopMonitors();
+            vi.useRealTimers();
+            container.remove();
+        }
+    });
+
+    it("keeps the charts and says so when a refresh fails", async () => {
+        global.fetch = vi.fn(async () => {
+            throw new TypeError("Failed to fetch");
+        });
+        const container = document.createElement("div");
+        try {
+            await initQueueHistory({ container });
+            // Every day failing reads as no history rather than an error.
+            expect(container.querySelector(".history-screen").textContent).toContain("No history");
+        } finally {
+            stopMonitors();
+        }
+    });
+
     it("says when there is no history, and marks the chosen range", () => {
         const root = document.createElement("div");
         root.innerHTML = renderQueueHistory({ days: 30, points: [] });
         expect(root.querySelector(".history-screen").textContent).toContain("No history for the last 30 days");
         expect(root.querySelector('[data-history-range="30"]').getAttribute("aria-pressed")).toBe("true");
         expect(root.querySelector('[data-history-range="7"]').getAttribute("aria-pressed")).toBe("false");
+        // A range or width that is not one of the page's own falls back to the defaults.
+        root.innerHTML = renderQueueHistory({ days: '7"><img src=x onerror=alert(1)>', points: [] }, "<b>");
+        expect(root.querySelector("img")).toBeNull();
+        expect(root.querySelector('[data-history-range="7"]').getAttribute("aria-pressed")).toBe("true");
         root.innerHTML = renderQueueHistory({ days: 7, error: "boom" });
         expect(root.querySelector(".squeue-status").textContent).toBe("unavailable");
     });
