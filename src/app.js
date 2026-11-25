@@ -4455,8 +4455,9 @@ function renderHistoryChart({
     reference = null,
     format = formatCount,
     note = "",
-    width = HISTORY_CHART.width,
+    width: chartWidth = HISTORY_CHART.width,
 }) {
+    const width = historyWidth(chartWidth);
     const id = `history-chart-${++_historyChartCount}`;
     const { height, left, right, top, bottom } = HISTORY_CHART;
     const plotWidth = width - left - right;
@@ -4757,8 +4758,16 @@ function renderHistoryTable(points, reasons) {
     return `<details class="history-table"><summary>Table (hourly)</summary><div class="history-table-scroll"><table class="squeue-table"><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div></details>`;
 }
 
+// A range in days the page offers, and a chart width in whole pixels: both are written into
+// HTML, so anything else falls back to the defaults.
+const historyRange = (days) => (HISTORY_RANGES_DAYS.includes(Number(days)) ? Number(days) : HISTORY_DEFAULT_RANGE_DAYS);
+const historyWidth = (width) =>
+    Number.isFinite(Number(width)) && Number(width) > 0 ? Math.round(Number(width)) : HISTORY_CHART.width;
+
 // The history section's screen for `points` over `days`.
-function renderHistoryCharts(points, days, now = Date.now(), width = HISTORY_CHART.width) {
+function renderHistoryCharts(points, rangeDays, now = Date.now(), chartWidth = HISTORY_CHART.width) {
+    const days = historyRange(rangeDays);
+    const width = historyWidth(chartWidth);
     _historyCharts.clear();
     if (!points || points.length === 0) {
         return `<p class="sched-note">No history for the last ${days === 1 ? "day" : `${days} days`} yet. The runner publishes it to the ${e(MONITOR_HISTORY_BRANCH)} branch every hour.</p>`;
@@ -4816,7 +4825,8 @@ function renderHistoryCharts(points, days, now = Date.now(), width = HISTORY_CHA
     return html;
 }
 
-function renderHistoryRanges(selected) {
+function renderHistoryRanges(rangeDays) {
+    const selected = historyRange(rangeDays);
     const buttons = HISTORY_RANGES_DAYS.map(
         (days) =>
             `<button type="button" class="history-range${days === selected ? " history-range-active" : ""}" data-history-range="${days}" aria-pressed="${days === selected}">${days === 1 ? "24 h" : `${days} d`}</button>`
@@ -4829,9 +4839,11 @@ function renderHistoryRanges(selected) {
 // undefined while loading.
 // `width` is the charts' width in pixels, so they are drawn at their size rather than stretched.
 function renderQueueHistory(
-    { days = HISTORY_DEFAULT_RANGE_DAYS, points = undefined, error = null } = {},
-    width = HISTORY_CHART.width
+    { days: rangeDays = HISTORY_DEFAULT_RANGE_DAYS, points = undefined, error = null } = {},
+    chartWidth = HISTORY_CHART.width
 ) {
+    const days = historyRange(rangeDays);
+    const width = historyWidth(chartWidth);
     let status = "";
     let body;
     if (points === undefined && !error) {
