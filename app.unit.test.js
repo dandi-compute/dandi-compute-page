@@ -45,6 +45,14 @@ const {
     PARTITIONS_SPEC_URL,
     BLOB_HEADS_URL,
     renderStatusPage,
+    renderSchedulingPanel,
+    parsePipeTables,
+    parseSlurmMemoryGb,
+    parseTres,
+    squeueJobs,
+    summarizePendingReasons,
+    qosUsage,
+    parseLimits,
     stopMonitors,
     summarizeSqueueJobs,
     archiveStateCacheKey,
@@ -4518,6 +4526,8 @@ describe("live squeue monitor", () => {
             exitStatus: "0",
             sourceUrl:
                 "https://github.com/dandi-compute/dandi-compute-global-logs/blob/monitor/2026-11-05/monitor/14/20261105T144502-squeue/stdout",
+            // A snapshot without the tables launcher/monitor.sh records beside it.
+            files: { "priority.txt": null, "fairshare.txt": null, "limits.txt": null },
         });
         const urls = global.fetch.mock.calls.map(([url]) => url);
         expect(urls[0]).toBe(`${RAW}/monitor/2026-11-05/monitor/LATEST`);
@@ -5739,5 +5749,195 @@ describe("Status page", () => {
         expect(disk.querySelector("#status-disk")).not.toBeNull();
         // Just the headings and the monitors: no notes under the headings.
         expect(root.querySelectorAll("p")).toHaveLength(0);
+    });
+});
+
+describe("scheduling panel", () => {
+    // squeue as launcher/monitor.sh formats it, PRIORITY and QOS included.
+    const line = (id, partition, name, state, nodes, cpus, memory, priority, qos, reason) =>
+        [
+            id.padStart(30),
+            partition.padEnd(15),
+            name.padEnd(40),
+            state.padStart(2),
+            "0:00".padStart(10),
+            nodes.padStart(6),
+            cpus.padStart(2),
+            memory.padStart(10),
+            priority.padStart(10),
+            qos.padEnd(10),
+            reason.padEnd(30),
+        ].join(" ");
+    const STDOUT = [
+        line("JOBID", "PARTITION", "NAME", "ST", "NODES", "CP", "MIN_MEMORY", "PRIORITY", "QOS", "NODELIST(REASON)"),
+        line("100", "mit_normal", "nf-preprocessing", "R", "1", "16", "256G", "12000", "normal", "node1"),
+        line("101", "mit_normal", "nf-nwb_ecephys", "PD", "1", "4", "256G", "11000", "normal", "(QOSMaxMemoryPerUser)"),
+        line("102", "mit_normal", "nf-postprocessing", "PD", "1", "16", "64G", "10000", "normal", "(Priority)"),
+        line("103", "mit_normal", "nf-curation", "PD", "1", "4", "8000Mc", "9000", "normal", "(QOSMaxMemoryPerUser)"),
+        line("104", "mit_normal_gpu", "nf-kilosort4", "R", "1", "16", "64G", "15000", "gpu", "node2"),
+    ].join("\n");
+    const LIMITS = [
+        "PARTITION|QOS|MAXTIME|MAXNODES|MAXMEMPERNODE|MAXCPUSPERNODE|DEFMEMPERCPU|TRES",
+        "mit_normal|part_normal|12:00:00|UNLIMITED|UNLIMITED|UNLIMITED|4000|cpu=1000,mem=8000G,node=20",
+        "",
+        "Name|Priority|MaxTRESPU|MaxJobsPU|MaxSubmitPU|MaxTRES|MaxWall|GrpTRES|GrpJobs",
+        "part_normal|0|cpu=512,mem=500G||||||",
+        "normal|0|cpu=256,mem=1T||||||",
+        "",
+    ].join("\n");
+    const PRIORITY = [
+        "JOBID|PARTITION|PRIORITY|AGE|FAIRSHARE|JOBSIZE|PARTITION_FACTOR|QOS|NICE",
+        "101|mit_normal|11000|500|8000|100|1000|1400|0",
+        "",
+    ].join("\n");
+    const FAIRSHARE = [
+        "Account|User|RawShares|NormShares|RawUsage|NormUsage|EffectvUsage|FairShare|LevelFS",
+        "dandi||1|0.01|123456|0.02|0.02||",
+        "dandi|dandiuser|parent|0.01|123456|0.02|0.02|0.400000|0.5",
+    ].join("\n");
+
+    it.each([
+        ["256G", 256],
+        ["4000M", 4000 / 1024],
+        ["1T", 1024],
+        ["1.5t", 1536],
+        ["2048", 2],
+        ["512K", 512 / (1024 * 1024)],
+        ["", null],
+        ["UNLIMITED", null],
+    ])("reads the size %j as %j GB", (value, gb) => {
+        expect(parseSlurmMemoryGb(value)).toBe(gb);
+    });
+
+    it("reads the parts of a TRES list it uses", () => {
+        expect(parseTres("cpu=512,mem=4000G,gres/gpu=8,node=10,billing=99")).toEqual({
+            cpu: 512,
+            memGb: 4000,
+            gpu: 8,
+            node: 10,
+        });
+        expect(parseTres("")).toEqual({});
+    });
+
+    it("reads blank-line-separated pipe tables and marks numeric columns", () => {
+        const [partitions, qos] = parsePipeTables(LIMITS);
+        expect(partitions.columns.map(({ label }) => label)).toEqual([
+            "PARTITION",
+            "QOS",
+            "MAXTIME",
+            "MAXNODES",
+            "MAXMEMPERNODE",
+            "MAXCPUSPERNODE",
+            "DEFMEMPERCPU",
+            "TRES",
+        ]);
+        expect(partitions.columns.filter(({ right }) => right).map(({ label }) => label)).toEqual(["DEFMEMPERCPU"]);
+        expect(qos.rows).toHaveLength(2);
+        expect(parsePipeTables("only a header|x\n")).toEqual([]);
+        expect(parsePipeTables(null)).toEqual([]);
+    });
+
+    it("reads squeue's jobs, with memory per node or per CPU", () => {
+        const jobs = squeueJobs(STDOUT);
+        expect(jobs.map(({ state, cpus, memGb, reason }) => [state, cpus, memGb, reason])).toEqual([
+            ["R", 16, 256, null],
+            ["PD", 4, 256, "QOSMaxMemoryPerUser"],
+            ["PD", 16, 64, "Priority"],
+            ["PD", 4, (8000 / 1024) * 4, "QOSMaxMemoryPerUser"],
+            ["R", 16, 64, null],
+        ]);
+        expect(squeueJobs("")).toBeNull();
+    });
+
+    it("counts pending jobs per reason, most first", () => {
+        expect(summarizePendingReasons(squeueJobs(STDOUT))).toEqual([
+            ["QOSMaxMemoryPerUser", 2],
+            ["Priority", 1],
+        ]);
+    });
+
+    it("counts each job against every capped QOS that holds it, across partitions", () => {
+        const { capped, uncapped } = qosUsage(squeueJobs(STDOUT), parseLimits(LIMITS));
+        expect(capped).toEqual([
+            {
+                qos: "normal",
+                partitions: ["mit_normal"],
+                caps: { cpu: 256, memGb: 1024 },
+                used: { memGb: 256, cpu: 16 },
+                asked: { memGb: 256 + 64 + (8000 / 1024) * 4, cpu: 24 },
+            },
+            {
+                qos: "part_normal",
+                partitions: ["mit_normal"],
+                caps: { cpu: 512, memGb: 500 },
+                used: { memGb: 256, cpu: 16 },
+                asked: { memGb: 256 + 64 + (8000 / 1024) * 4, cpu: 24 },
+            },
+        ]);
+        // The gpu QOS has no recorded cap.
+        expect(uncapped).toEqual([
+            { partition: "mit_normal_gpu", used: { memGb: 64, cpu: 16 }, asked: { memGb: 0, cpu: 0 } },
+        ]);
+    });
+
+    it("draws reasons, usage against the caps, the priority breakdown and the limits", () => {
+        const root = document.createElement("div");
+        root.innerHTML = renderSchedulingPanel({
+            stdout: STDOUT,
+            files: { "priority.txt": PRIORITY, "fairshare.txt": FAIRSHARE, "limits.txt": LIMITS },
+        });
+
+        const reasons = [...root.querySelectorAll(".sched-reason")];
+        expect(reasons.map((chip) => chip.textContent)).toEqual(["QOSMaxMemoryPerUser 2", "Priority 1"]);
+        expect(reasons[0].title).toContain("memory");
+
+        const meters = [...root.querySelectorAll(".disk-meter")].map(
+            (meter) => meter.querySelector(".disk-meter-text").textContent
+        );
+        expect(meters).toEqual([
+            "256 GB / 1 TB",
+            "16 / 256",
+            "256 GB / 500 GB",
+            "16 / 512",
+            "64 GB / no per-user cap recorded",
+            "16 / no per-user cap recorded",
+        ]);
+        expect(root.querySelector(".disk-meter").title).toContain("Jobs in mit_normal.");
+
+        expect(root.querySelector(".sched-facts").textContent).toContain("Fair-share factor 0.400000");
+        const priority = root.querySelectorAll(".sched-panel > .sched-table tbody tr");
+        expect(priority).toHaveLength(1);
+        expect(root.querySelectorAll(".sched-limits table")).toHaveLength(2);
+    });
+
+    it("follows the squeue terminal only when asked for", () => {
+        const snapshot = {
+            branch: "monitor/2026-11-05",
+            recordName: "14/20261105T144502-squeue",
+            takenAt: 0,
+            stdout: STDOUT,
+            stderr: "",
+            exitStatus: "0",
+            sourceUrl: "https://example.org",
+        };
+        const root = document.createElement("div");
+        root.innerHTML = renderSqueueMonitor({ snapshot }, 0, { scheduling: true });
+        expect(root.querySelector(".squeue-screen + .sched-panel")).not.toBeNull();
+
+        root.innerHTML = renderSqueueMonitor({ snapshot }, 0);
+        expect(root.querySelector(".sched-panel")).toBeNull();
+        root.innerHTML = renderSqueueMonitor({ snapshot: null }, 0, { scheduling: true });
+        expect(root.querySelector(".sched-panel")).toBeNull();
+    });
+
+    it("shows the reasons alone for a snapshot without the tables", () => {
+        const root = document.createElement("div");
+        root.innerHTML = renderSchedulingPanel({ stdout: STDOUT });
+
+        expect(root.querySelectorAll(".sched-reason")).toHaveLength(2);
+        expect(root.querySelector(".disk-meters-caption").textContent).toContain("caps not recorded");
+        expect(root.querySelector(".sched-facts")).toBeNull();
+        expect(root.querySelector(".sched-limits")).toBeNull();
+        expect(renderSchedulingPanel({ stdout: "" })).toBe("");
     });
 });
