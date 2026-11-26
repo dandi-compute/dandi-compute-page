@@ -46,6 +46,15 @@ const {
     BLOB_HEADS_URL,
     renderStatusPage,
     renderSchedulingPanel,
+    historyDays,
+    historyLineTime,
+    parseHistoryLines,
+    fetchMonitorHistory,
+    historyReasonSeries,
+    niceCeiling,
+    renderHistoryCharts,
+    renderQueueHistory,
+    initQueueHistory,
     parsePipeTables,
     parseSlurmMemoryGb,
     parseTres,
@@ -5732,13 +5741,17 @@ describe("common issues extraction", () => {
 });
 
 describe("Status page", () => {
-    it("lays the Status page out as a queue section and a disk section with their containers", () => {
+    it("lays the Status page out as queue, queue history and disk sections with their containers", () => {
         const root = document.createElement("div");
         root.innerHTML = renderStatusPage();
         expect([...root.querySelectorAll(".status-heading")].map((h) => h.textContent)).toEqual([
             "SLURM Queue",
+            "Queue History",
             "Disk Usage",
         ]);
+        expect(
+            root.querySelector("#status-history-heading").closest(".status-section").querySelector("#status-history")
+        ).not.toBeNull();
         const queue = root.querySelector("#status-queue-heading").closest(".status-section");
         // The queue priorities card follows the live queue.
         expect([...queue.querySelectorAll("#status-queue, #queue-priorities")].map((d) => d.id)).toEqual([
@@ -5939,5 +5952,191 @@ describe("scheduling panel", () => {
         expect(root.querySelector(".sched-facts")).toBeNull();
         expect(root.querySelector(".sched-limits")).toBeNull();
         expect(renderSchedulingPanel({ stdout: "" })).toBe("");
+    });
+});
+
+describe("queue history", () => {
+    const RAW = "https://raw.githubusercontent.com/dandi-compute/dandi-compute-global-logs/refs/heads";
+    // 2026-11-05 14:50 US Eastern.
+    const NOW = new Date("2026-11-05T19:50:00Z");
+    const line = (t, extra = {}) =>
+        JSON.stringify({
+            t,
+            jobs: { R: 2, PD: 3 },
+            pending: { Priority: 1, QOSMaxMemoryPerUser: 2 },
+            partitions: { mit_normal: { mem: 256, cpu: 16 } },
+            ...extra,
+        });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+    });
+
+    it("lists the US Eastern dates of the range, today last", () => {
+        expect(historyDays(3, NOW)).toEqual(["2026-11-03", "2026-11-04", "2026-11-05"]);
+        // 03:00 UTC on Nov 6 is still Nov 5 in the East.
+        expect(historyDays(1, new Date("2026-11-06T03:00:00Z"))).toEqual(["2026-11-05"]);
+    });
+
+    it("reads line times as US Eastern wall-clock times", () => {
+        expect(historyLineTime("2026-11-05T14:45:02")).toBe(Date.parse("2026-11-05T19:45:02Z"));
+        expect(historyLineTime("2026-07-05T14:45:02")).toBe(Date.parse("2026-07-05T18:45:02Z"));
+        expect(historyLineTime("nonsense")).toBeNull();
+    });
+
+    it("skips torn and timeless lines", () => {
+        const points = parseHistoryLines(`${line("2026-11-05T14:00:01")}\n{"t":"bad"}\n{torn\n\n`);
+        expect(points.map((p) => p.at)).toEqual([Date.parse("2026-11-05T19:00:01Z")]);
+    });
+
+    it("fetches each day of the range and keeps the points inside it, oldest first", async () => {
+        global.fetch = vi.fn(async (url) => {
+            if (url === `${RAW}/monitor-history/history/2026-11-05.jsonl`)
+                return new Response(`${line("2026-11-05T14:00:01")}\n${line("2026-11-05T09:00:01")}\n`);
+            if (url === `${RAW}/monitor-history/history/2026-11-04.jsonl`)
+                return new Response(`${line("2026-11-04T10:00:01")}\n${line("2026-11-04T16:00:01")}\n`);
+            return new Response("404: Not Found", { status: 404 });
+        });
+        const points = await fetchMonitorHistory(1, NOW);
+        // 24 hours back from 14:50 on Nov 5 drops the morning of Nov 4.
+        expect(points.map((p) => p.t)).toEqual(["2026-11-04T16:00:01", "2026-11-05T09:00:01", "2026-11-05T14:00:01"]);
+        expect(global.fetch.mock.calls.map(([url]) => url)).toEqual([
+            `${RAW}/monitor-history/history/2026-11-04.jsonl`,
+            `${RAW}/monitor-history/history/2026-11-05.jsonl`,
+        ]);
+    });
+
+    it("charts the commonest reasons and folds the rest into Other", () => {
+        const points = [{ pending: { A: 5, B: 4, C: 3, D: 2, E: 1, F: 1 } }, { pending: { A: 1, F: 2 } }];
+        const series = historyReasonSeries(points);
+        // C and F tie on 3, so they go alphabetically.
+        expect(series.map((s) => s.name)).toEqual(["A", "B", "C", "F", "Other"]);
+        expect(series.find((s) => s.name === "Other").values).toEqual([3, 0]);
+        // Five reasons fit without folding.
+        expect(historyReasonSeries([{ pending: { A: 1, B: 1, C: 1, D: 1, E: 1 } }]).map((s) => s.name)).toHaveLength(5);
+    });
+
+    it.each([
+        [0, 1],
+        [0.8, 1],
+        [3, 5],
+        [130, 200],
+        [512, 1000],
+        [2400, 2500],
+    ])("rounds an axis top of %j up to %j", (value, expected) => {
+        expect(niceCeiling(value)).toBe(expected);
+    });
+
+    it("draws a chart per measure, QOS memory against its cap, and an hourly table", () => {
+        const points = parseHistoryLines(
+            [
+                line("2026-11-05T13:00:01", {
+                    qos: { normal: { mem: 256, cpu: 16, mem_cap: 500, cpu_cap: 256 } },
+                    fairshare: 0.4,
+                    priority: { min: 9000, median: 10000, max: 11000 },
+                }),
+                line("2026-11-05T13:05:01", {
+                    qos: { normal: { mem: 320, cpu: 32, mem_cap: 500, cpu_cap: 256 } },
+                    fairshare: 0.39,
+                    priority: { min: 9000, median: 10100, max: 11000 },
+                }),
+                line("2026-11-05T14:00:01", { qos: {}, fairshare: 0.38 }),
+            ].join("\n")
+        );
+        const root = document.createElement("div");
+        root.innerHTML = renderHistoryCharts(points, 1, NOW.getTime());
+        expect([...root.querySelectorAll(".history-title > span:first-child")].map((t) => t.textContent)).toEqual([
+            "Pending jobs by reason",
+            "Memory held under QOS normal (GB)",
+            "Fair-share factor",
+            "Median priority of pending jobs",
+        ]);
+        expect([...root.querySelectorAll(".history-legend")][0].textContent).toContain("QOSMaxMemoryPerUser");
+        // The cap is one line held to the end of the range.
+        const cap = root.querySelector(".history-reference");
+        expect(cap.getAttribute("d").match(/M/g)).toHaveLength(1);
+        expect(Number(cap.getAttribute("d").split("L").pop().split(",")[0])).toBe(640 - 12);
+        // The hour-long silence between 13:05 and 14:00 breaks the line, and the lone 14:00 value is a marker.
+        const fairShare = [...root.querySelectorAll(".history-chart")][2];
+        expect(fairShare.querySelectorAll(".history-line")).toHaveLength(1);
+        expect(fairShare.querySelectorAll(".history-point")).toHaveLength(1);
+        const rows = root.querySelectorAll(".history-table tbody tr");
+        expect(rows).toHaveLength(2);
+        expect(rows[0].textContent).toContain("0.38");
+    });
+
+    it("falls back to memory per partition for a history without caps", () => {
+        const root = document.createElement("div");
+        root.innerHTML = renderHistoryCharts(parseHistoryLines(line("2026-11-05T13:00:01")), 7, NOW.getTime());
+        const titles = [...root.querySelectorAll(".history-title")].map((t) => t.textContent);
+        expect(titles[1]).toContain("Memory held in mit_normal (GB)");
+        expect(titles[1]).toContain("caps not recorded");
+        expect(titles).toHaveLength(2);
+    });
+
+    it("loads the history, switches ranges and reads out the snapshot under the pointer", async () => {
+        const day = (date) =>
+            [line(`${date}T13:00:01`), line(`${date}T13:05:01`, { pending: { Priority: 4 } })].join("\n");
+        global.fetch = vi.fn(async (url) => {
+            const match = /history\/(\d{4}-\d{2}-\d{2})\.jsonl$/.exec(url);
+            return match ? new Response(day(match[1])) : new Response("", { status: 404 });
+        });
+        vi.useFakeTimers({ toFake: ["Date"] });
+        vi.setSystemTime(NOW);
+        const container = document.createElement("div");
+        document.body.appendChild(container);
+        try {
+            await initQueueHistory({ container });
+            const section = container.querySelector("#queue-history");
+            expect(section.querySelectorAll(".history-chart").length).toBeGreaterThan(0);
+            expect(global.fetch).toHaveBeenCalledTimes(8);
+
+            section.querySelector('[data-history-range="1"]').dispatchEvent(new MouseEvent("click", { bubbles: true }));
+            expect(section.querySelector(".squeue-status").textContent).toBe("loading");
+            await vi.waitFor(() => expect(section.querySelector(".history-chart")).not.toBeNull());
+            expect(section.querySelector('[data-history-range="1"]').getAttribute("aria-pressed")).toBe("true");
+
+            const plot = section.querySelector(".history-chart");
+            plot.querySelector("svg").dispatchEvent(new MouseEvent("pointermove", { bubbles: true, clientX: 0 }));
+            const tooltip = plot.querySelector(".history-tooltip");
+            expect(tooltip.hidden).toBe(false);
+            expect(tooltip.querySelectorAll(".history-tooltip-row").length).toBeGreaterThan(0);
+            expect(plot.querySelector(".history-crosshair").getAttribute("visibility")).toBe("visible");
+            plot.querySelector("svg").dispatchEvent(new MouseEvent("pointerleave", { bubbles: true }));
+            section.dispatchEvent(new MouseEvent("pointerleave"));
+            expect(tooltip.hidden).toBe(true);
+        } finally {
+            stopMonitors();
+            vi.useRealTimers();
+            container.remove();
+        }
+    });
+
+    it("keeps the charts and says so when a refresh fails", async () => {
+        global.fetch = vi.fn(async () => {
+            throw new TypeError("Failed to fetch");
+        });
+        const container = document.createElement("div");
+        try {
+            await initQueueHistory({ container });
+            // Every day failing reads as no history rather than an error.
+            expect(container.querySelector(".history-screen").textContent).toContain("No history");
+        } finally {
+            stopMonitors();
+        }
+    });
+
+    it("says when there is no history, and marks the chosen range", () => {
+        const root = document.createElement("div");
+        root.innerHTML = renderQueueHistory({ days: 30, points: [] });
+        expect(root.querySelector(".history-screen").textContent).toContain("No history for the last 30 days");
+        expect(root.querySelector('[data-history-range="30"]').getAttribute("aria-pressed")).toBe("true");
+        expect(root.querySelector('[data-history-range="7"]').getAttribute("aria-pressed")).toBe("false");
+        // A range or width that is not one of the page's own falls back to the defaults.
+        root.innerHTML = renderQueueHistory({ days: '7"><img src=x onerror=alert(1)>', points: [] }, "<b>");
+        expect(root.querySelector("img")).toBeNull();
+        expect(root.querySelector('[data-history-range="7"]').getAttribute("aria-pressed")).toBe("true");
+        root.innerHTML = renderQueueHistory({ days: 7, error: "boom" });
+        expect(root.querySelector(".squeue-status").textContent).toBe("unavailable");
     });
 });
