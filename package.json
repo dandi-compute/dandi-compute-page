@@ -1,6 +1,6 @@
 {
     "name": "dandi-compute-page",
-    "version": "1.5.1",
+    "version": "1.7.1",
     "description": "Simple webpage rendering the basic aspects of DANDI Compute - AIND.",
     "main": "src/app.js",
     "scripts": {

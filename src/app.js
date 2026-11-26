@@ -3,7 +3,7 @@
    TODO: once this project migrates to TS + Vite, source this from
    package.json directly (e.g. via Vite's `define`) instead of duplicating
    it here. */
-const APP_VERSION = "1.5.1";
+const APP_VERSION = "1.7.1";
 const OWNER = "dandi-compute";
 const REPO = "001697";
 const BRANCH = "draft";
@@ -2853,6 +2853,14 @@ const SQUEUE_STALE_AFTER_MS = 15 * 60 * 1000;
    Status page. */
 const SQUEUE_KIND = "monitor";
 const DISK_KIND = "disk";
+/* Tables launcher/monitor.sh leaves beside the squeue snapshot, each
+   "|"-separated with a header line: sprio's breakdown of every pending job's
+   priority, this user's sshare fair-share, and the limits of the partitions
+   and QOS the jobs run under (two tables, a blank line between them).
+   Snapshots older than these files, or whose command failed, lack them. */
+const MONITOR_EXTRA_FILES = {
+    [SQUEUE_KIND]: ["priority.txt", "fairshare.txt", "limits.txt"],
+};
 const DISK_POLL_INTERVAL_MS = 5 * 60 * 1000;
 // Three missed 30-minute snapshots mark the view stale.
 const DISK_STALE_AFTER_MS = 90 * 60 * 1000;
@@ -2993,12 +3001,14 @@ async function fetchLatestMonitorSnapshot(kind, now = new Date()) {
 
     const { branch, recordName } = found;
     const directory = `${kind}/${recordName}`;
-    const [stdout, stderr, exitStatus] = await Promise.all([
+    const extraNames = MONITOR_EXTRA_FILES[kind] ?? [];
+    const [stdout, stderr, exitStatus, ...extras] = await Promise.all([
         fetchGlobalLogsText(branch, `${directory}/stdout`),
         fetchGlobalLogsText(branch, `${directory}/stderr`).catch(() => null),
         fetchGlobalLogsText(branch, `${directory}/exit_status`).catch(() => null),
+        ...extraNames.map((fileName) => fetchGlobalLogsText(branch, `${directory}/${fileName}`).catch(() => null)),
     ]);
-    return {
+    const snapshot = {
         branch,
         recordName,
         takenAt: monitorRecordTime(recordName),
@@ -3007,6 +3017,8 @@ async function fetchLatestMonitorSnapshot(kind, now = new Date()) {
         exitStatus: exitStatus?.trim() || null,
         sourceUrl: `${GLOBAL_LOGS_REPO_URL}/blob/${branch}/${directory}/stdout`,
     };
+    if (extraNames.length > 0) snapshot.files = Object.fromEntries(extraNames.map((n, i) => [n, extras[i]]));
+    return snapshot;
 }
 
 const fetchLatestSqueueSnapshot = (now = new Date()) => fetchLatestMonitorSnapshot(SQUEUE_KIND, now);
@@ -3233,10 +3245,15 @@ function renderMonitorFrame({
 }
 
 // The squeue monitor. Jobs named in `hiddenJobNames` are left out of the
-// table and the tally.
-function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now(), { hiddenJobNames = null } = {}) {
+// table and the tally. With `scheduling`, the scheduling panel follows the
+// terminal (see renderSchedulingPanel).
+function renderSqueueMonitor(
+    { snapshot, error = null } = {},
+    now = Date.now(),
+    { hiddenJobNames = null, scheduling = false } = {}
+) {
     if (snapshot && hiddenJobNames) snapshot = { ...snapshot, stdout: hideSqueueJobs(snapshot.stdout, hiddenJobNames) };
-    return renderMonitorFrame({
+    const frame = renderMonitorFrame({
         name: "squeue",
         snapshot,
         error,
@@ -3245,6 +3262,336 @@ function renderSqueueMonitor({ snapshot, error = null } = {}, now = Date.now(), 
         renderOutput: renderSqueueOutput,
         renderChips: (shown) => renderSqueueTally(shown.stdout),
     });
+    const panel = scheduling && snapshot ? renderSchedulingPanel(snapshot) : "";
+    return frame + panel;
+}
+
+/* ─── Scheduling panel (the Status page, under the squeue terminal) ── */
+/* Why pending jobs wait, read from the squeue snapshot and the tables
+   launcher/monitor.sh records beside it: the reasons the jobs are pending
+   for, what the running jobs hold against each partition's per-user caps,
+   the parts each pending job's priority adds up to and this user's
+   fair-share, and the limits themselves. */
+
+// What SLURM's pending reasons mean, for the chips' tooltips.
+const SLURM_PENDING_REASONS = {
+    Priority: "Waiting behind jobs of higher priority.",
+    Resources: "Next in line, waiting for nodes to free up.",
+    Dependency: "Waiting for a job it depends on to finish.",
+    DependencyNeverSatisfied: "A job it depends on failed, so it can never start.",
+    BeginTime: "Not allowed to start before its begin time.",
+    JobArrayTaskLimit: "The array's own throttle (the %N in its ID) is reached.",
+    ReqNodeNotAvail: "The nodes it needs are down, drained or reserved.",
+    PartitionTimeLimit: "It asks for more time than the partition allows.",
+    QOSMaxMemoryPerUser: "This user's running jobs already hold the most memory the QOS allows one user.",
+    QOSMaxCpuPerUserLimit: "This user's running jobs already hold the most CPUs the QOS allows one user.",
+    QOSMaxGRESPerUser: "This user's running jobs already hold the most GPUs the QOS allows one user.",
+    QOSMaxJobsPerUserLimit: "This user already runs as many jobs as the QOS allows.",
+    QOSMaxSubmitJobPerUserLimit: "This user already has as many jobs queued as the QOS allows.",
+    QOSMaxNodePerUserLimit: "This user's running jobs already use the most nodes the QOS allows one user.",
+    QOSGrpMemLimit: "Every user of the QOS together already holds its memory limit.",
+    QOSGrpCpuLimit: "Every user of the QOS together already holds its CPU limit.",
+    AssocGrpCpuLimit: "The account already holds its CPU limit.",
+    AssocGrpMemLimit: "The account already holds its memory limit.",
+    AssocMaxJobsLimit: "The account already runs as many jobs as it may.",
+};
+
+// The reason inside a pending job's "(...)" cell, without what follows a comma
+// (ReqNodeNotAvail lists the nodes). Null for a running job's node list.
+function pendingReason(cell) {
+    const text = String(cell ?? "").trim();
+    if (!text.startsWith("(")) return null;
+    const inner = text.slice(1, text.endsWith(")") ? -1 : undefined);
+    const reason = inner.split(",")[0].trim();
+    return reason || null;
+}
+
+// A size as squeue and sacctmgr print it ("256G", "4000M", "1.5T", "512")
+// in GB. A bare number is MB, SLURM's unit. Null when it is not a size.
+function parseSlurmMemoryGb(value) {
+    const match = /^(\d+(?:\.\d+)?)([KMGTP]?)$/i.exec(String(value ?? "").trim());
+    if (!match) return null;
+    const scale = { K: 1 / (1024 * 1024), M: 1 / 1024, G: 1, T: 1024, P: 1024 * 1024 }[match[2].toUpperCase() || "M"];
+    return Number(match[1]) * scale;
+}
+
+function formatGb(gb) {
+    if (gb >= 1024) return `${Number((gb / 1024).toFixed(1))} TB`;
+    return `${Number(gb.toFixed(gb < 10 ? 1 : 0))} GB`;
+}
+
+// A TRES list ("cpu=512,mem=4000G,gres/gpu=8") as { cpu, memGb, gpu, ... }
+// for the parts this page reads. Empty for an empty list.
+function parseTres(text) {
+    const tres = {};
+    for (const part of String(text ?? "").split(",")) {
+        const [name, value] = part.split("=");
+        if (!name || value === undefined) continue;
+        if (name === "mem") {
+            const gb = parseSlurmMemoryGb(value);
+            if (gb !== null) tres.memGb = gb;
+        } else if (name === "cpu") tres.cpu = Number(value);
+        else if (name === "gres/gpu") tres.gpu = Number(value);
+        else if (name === "node") tres.node = Number(value);
+    }
+    return tres;
+}
+
+// "|"-separated tables, separated by blank lines, each with a header line.
+// A column is numeric when every one of its non-empty cells is a number.
+function parsePipeTables(text) {
+    const tables = [];
+    for (const block of String(text ?? "").split(/\n\s*\n/)) {
+        const lines = block.split("\n").filter((line) => line.trim() !== "");
+        if (lines.length < 2 || !lines[0].includes("|")) continue;
+        const labels = lines[0].split("|").map((cell) => cell.trim());
+        const rows = lines.slice(1).map((line) => {
+            const cells = line.split("|").map((cell) => cell.trim());
+            return labels.map((_, index) => cells[index] ?? "");
+        });
+        const columns = labels.map((label, index) => ({
+            label,
+            right:
+                rows.some((row) => row[index] !== "") &&
+                rows.every((row) => row[index] === "" || /^-?\d+(\.\d+)?$/.test(row[index])),
+        }));
+        tables.push({ columns, rows });
+    }
+    return tables;
+}
+
+// A parsed table's rows as objects keyed by upper-cased column label.
+function tableRecords({ columns, rows }) {
+    return rows.map((row) => Object.fromEntries(columns.map(({ label }, index) => [label.toUpperCase(), row[index]])));
+}
+
+// The squeue snapshot's rows as { partition, state, cpus, memGb, qos, reason }.
+// Memory is MIN_MEMORY per node times the nodes, or per CPU ("4000Mc") times
+// the CPUs. Null when the snapshot does not parse as squeue's table.
+function squeueJobs(stdout) {
+    const text = squeueScreenText(stdout ?? "");
+    const table = text ? parseSqueueTable(text) : null;
+    if (!table) return null;
+    const column = (test) => table.columns.findIndex(({ label }) => test(label));
+    const at = {
+        partition: column((l) => l === "PARTITION"),
+        state: column((l) => l === "ST" || l === "STATE"),
+        nodes: column((l) => l === "NODES"),
+        // squeue cuts the header to the field's width, so %.2C is headed "CP".
+        cpus: column((l) => l === "CPUS" || l === "CP"),
+        memory: column((l) => l === "MIN_MEMORY"),
+        qos: column((l) => l === "QOS"),
+        reason: column((l) => l.startsWith("NODELIST")),
+    };
+    return table.rows.map((row) => {
+        const cell = (key) => (at[key] >= 0 ? row[at[key]] : "");
+        const nodes = Number(cell("nodes")) || 1;
+        const cpus = Number(cell("cpus")) || 0;
+        const memoryCell = cell("memory");
+        const perCpu = /c$/i.test(memoryCell);
+        const memory = parseSlurmMemoryGb(perCpu ? memoryCell.slice(0, -1) : memoryCell);
+        return {
+            partition: cell("partition"),
+            state: cell("state"),
+            cpus,
+            memGb: memory === null ? null : memory * (perCpu ? cpus : nodes),
+            qos: cell("qos"),
+            reason: cell("state") === "PD" ? pendingReason(cell("reason")) : null,
+        };
+    });
+}
+
+// Pending rows per reason, most first. A pending job array is one row.
+function summarizePendingReasons(jobs) {
+    const counts = new Map();
+    for (const job of jobs ?? []) {
+        if (job.state !== "PD") continue;
+        const reason = job.reason ?? "unknown";
+        counts.set(reason, (counts.get(reason) ?? 0) + 1);
+    }
+    return [...counts].sort(([a, x], [b, y]) => y - x || a.localeCompare(b));
+}
+
+// limits.txt as { partitions: Map(name → record), qos: Map(name → record) }.
+function parseLimits(text) {
+    const partitions = new Map();
+    const qos = new Map();
+    for (const table of parsePipeTables(text)) {
+        for (const record of tableRecords(table)) {
+            if (record.PARTITION) partitions.set(record.PARTITION, record);
+            else if (record.NAME) qos.set(record.NAME, record);
+        }
+    }
+    return { partitions, qos };
+}
+
+// Per QOS with a per-user cap (MaxTRESPU), what this user's running jobs hold
+// against it and what the pending ones ask for. SLURM counts a job against its
+// own QOS and against its partition's QOS, across every partition, so a job
+// is counted under each of the two that has a cap. Then the partitions with
+// jobs under no capped QOS. { capped: [{ qos, partitions, caps, used, asked }],
+// uncapped: [{ partition, used, asked }] }, where caps, used and asked are
+// { memGb, cpu }.
+function qosUsage(jobs, limits) {
+    const capOf = (name) => {
+        const tres = parseTres(limits.qos.get(name)?.MAXTRESPU);
+        return "memGb" in tres || "cpu" in tres ? tres : null;
+    };
+    const governing = (job) =>
+        [job.qos, limits.partitions.get(job.partition)?.QOS].filter(
+            (name, index, all) => name && name !== "N/A" && all.indexOf(name) === index && capOf(name)
+        );
+    const empty = () => ({ memGb: 0, cpu: 0 });
+    const add = (totals, job) => {
+        totals.memGb += job.memGb ?? 0;
+        totals.cpu += job.cpus ?? 0;
+    };
+    const capped = new Map();
+    const uncapped = new Map();
+    for (const job of jobs) {
+        if (job.state !== "R" && job.state !== "PD") continue;
+        const names = governing(job);
+        const targets = names.length > 0 ? names.map((name) => ["qos", name]) : [["partition", job.partition]];
+        for (const [type, name] of targets) {
+            const into = type === "qos" ? capped : uncapped;
+            if (!into.has(name)) into.set(name, { partitions: new Set(), used: empty(), asked: empty() });
+            const entry = into.get(name);
+            entry.partitions.add(job.partition);
+            add(job.state === "R" ? entry.used : entry.asked, job);
+        }
+    }
+    const byName = ([a], [b]) => a.localeCompare(b);
+    return {
+        capped: [...capped].sort(byName).map(([qos, { partitions, used, asked }]) => ({
+            qos,
+            partitions: [...partitions].filter(Boolean).sort(),
+            caps: capOf(qos),
+            used,
+            asked,
+        })),
+        uncapped: [...uncapped]
+            .sort(byName)
+            .filter(([partition]) => partition)
+            .map(([partition, { used, asked }]) => ({ partition, used, asked })),
+    };
+}
+
+function percentCell(used, cap) {
+    return cap > 0 ? `${Math.round((100 * used) / cap)}%` : "";
+}
+
+// Memory and CPUs held by running jobs against each QOS's per-user caps, with
+// what the pending jobs ask for in the tooltip; then the partitions whose jobs
+// no recorded cap holds.
+function renderQosUsage(jobs, limits) {
+    const { capped, uncapped } = qosUsage(jobs, limits);
+    const pendingNote = (asked, format) =>
+        asked > 0 ? `Pending jobs ask for ${format(asked)} more.` : "Nothing pending.";
+    const parts = [
+        { key: "memGb", kind: "memory", format: formatGb },
+        { key: "cpu", kind: "CPUs", format: (n) => String(n) },
+    ];
+    let meters = "";
+    for (const { qos, partitions, caps, used, asked } of capped) {
+        parts.forEach(({ key, kind, format }, index) => {
+            const cap = caps[key];
+            meters += renderDiskMeter({
+                name: `QOS ${qos}`,
+                kind,
+                continued: index > 0,
+                percentCell: cap ? percentCell(used[key], cap) : "",
+                text: cap ? `${format(used[key])} / ${format(cap)}` : `${format(used[key])} / no cap`,
+                title: `${pendingNote(asked[key], format)} Jobs in ${partitions.join(", ") || "no partition"}.`,
+            });
+        });
+    }
+    for (const { partition, used, asked } of uncapped) {
+        parts.forEach(({ key, kind, format }, index) => {
+            meters += renderDiskMeter({
+                name: partition,
+                kind,
+                continued: index > 0,
+                percentCell: "",
+                text: `${format(used[key])} / no per-user cap recorded`,
+                title: pendingNote(asked[key], format),
+            });
+        });
+    }
+    if (!meters) return "";
+    const note = limits.qos.size > 0 ? null : "caps not recorded in this snapshot";
+    return `<div class="disk-meters">${renderDiskMetersCaption("Running against per-user caps", note)}${meters}</div>`;
+}
+
+function renderPipeTable({ columns, rows }, className = "") {
+    const numeric = (column) => (column.right ? ' class="squeue-num"' : "");
+    const head = columns.map((column) => `<th scope="col"${numeric(column)}>${e(column.label)}</th>`).join("");
+    const body = rows
+        .map((row) => `<tr>${row.map((cell, index) => `<td${numeric(columns[index])}>${e(cell)}</td>`).join("")}</tr>`)
+        .join("");
+    return `<table class="squeue-table sched-table${className ? ` ${className}` : ""}"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+function renderPendingReasons(reasons) {
+    if (reasons.length === 0) return `<p class="sched-note">Nothing is pending.</p>`;
+    const chips = reasons
+        .map(([reason, count]) => {
+            const meaning = SLURM_PENDING_REASONS[reason] ?? "See SLURM's squeue documentation for this reason.";
+            return `<span class="sched-reason" title="${e(meaning)}">${e(reason)} <span class="sched-count">${count}</span></span>`;
+        })
+        .join("");
+    return `<div class="sched-reasons">${chips}</div>`;
+}
+
+// The fair-share line: this user's row of sshare (the one with a user).
+function renderFairShare(text) {
+    const table = parsePipeTables(text)[0];
+    const record = table ? (tableRecords(table).find((row) => row.USER) ?? tableRecords(table)[0]) : null;
+    if (!record) return "";
+    const facts = [
+        ["Fair-share factor", record.FAIRSHARE],
+        ["Effective usage", record.EFFECTVUSAGE],
+        ["Normalized shares", record.NORMSHARES],
+        ["Account", record.ACCOUNT],
+    ].filter(([, value]) => value);
+    if (facts.length === 0) return "";
+    const items = facts
+        .map(
+            ([label, value]) =>
+                `<span class="sched-fact"><span class="sched-fact-label">${e(label)}</span> ${e(value)}</span>`
+        )
+        .join("");
+    return `<div class="sched-facts" title="From sshare. A fair-share factor near 1 means little recent usage against the account's share; near 0, a lot.">${items}</div>`;
+}
+
+const renderSchedulingCaption = (title, note = null) =>
+    `<div class="sched-caption"><span>${e(title)}</span>${note ? `<span class="sched-caption-note">${e(note)}</span>` : ""}</div>`;
+
+function renderSchedulingPanel(snapshot) {
+    const jobs = squeueJobs(snapshot.stdout);
+    if (!jobs) return "";
+    const files = snapshot.files ?? {};
+    const limits = parseLimits(files["limits.txt"]);
+    let html = renderSchedulingCaption("Why jobs are pending");
+    html += renderPendingReasons(summarizePendingReasons(jobs));
+    html += renderQosUsage(jobs, limits);
+
+    const priority = parsePipeTables(files["priority.txt"])[0];
+    const fairShare = renderFairShare(files["fairshare.txt"]);
+    if (priority || fairShare) {
+        html += renderSchedulingCaption(
+            "Priority of pending jobs",
+            "sprio: the weighted parts each job's priority adds up to"
+        );
+        html += fairShare;
+        if (priority) html += renderPipeTable(priority);
+    }
+    if (limits.partitions.size > 0 || limits.qos.size > 0) {
+        const tables = parsePipeTables(files["limits.txt"])
+            .map((table) => renderPipeTable(table))
+            .join("");
+        html += `<details class="sched-limits"><summary>Partition and QOS limits</summary>${tables}</details>`;
+    }
+    return `<div class="sched-panel" aria-label="Scheduling details">${html}</div>`;
 }
 
 /* ─── Disk usage monitor (the Status page) ──────────────────── */
@@ -3965,8 +4312,651 @@ const refreshDiskMonitor = () => diskMonitor.refresh();
 function stopMonitors() {
     squeueMonitor.stop();
     diskMonitor.stop();
+    queueHistory.stop();
     _newestMonitorBranch.clear();
 }
+
+/* ─── Queue history (the Status page) ───────────────────────── */
+/* The runner summarizes every squeue snapshot into one JSON line (launcher/
+   monitor_history.py in dandi-compute-runner) and every hour pushes each day's
+   lines to history/YYYY-MM-DD.jsonl on the monitor-history branch of the
+   global logs, a branch that is never deleted. A line holds `t` (the cluster's
+   US Eastern wall-clock time), `jobs` per state, `pending` per reason,
+   `partitions` and `qos` usage ({ mem, cpu, mem_pending, cpu_pending,
+   mem_cap, cpu_cap }), `fairshare` and `priority` ({ min, median, max, ...}).
+   Lines from before the scheduling tables were recorded lack `qos`,
+   `fairshare` and `priority`. */
+const MONITOR_HISTORY_BRANCH = "monitor-history";
+const HISTORY_RANGES_DAYS = [1, 7, 30];
+const HISTORY_DEFAULT_RANGE_DAYS = 7;
+const HISTORY_POLL_INTERVAL_MS = 30 * 60 * 1000;
+// Snapshots are 5 minutes apart, so a longer silence is an outage, drawn as a break.
+const HISTORY_GAP_MS = 20 * 60 * 1000;
+// Pending reasons beyond these many fold into "Other".
+const HISTORY_MAX_REASONS = 4;
+// The categorical slots, in fixed order, stepped for the terminal's dark surface (validated).
+const HISTORY_SERIES_COLORS = ["#338ced", "#e76624", "#00a888", "#d28e05", "#e24d8b"];
+
+// The US Eastern dates of the last `days` days, today last.
+function historyDays(days, now = new Date()) {
+    const dates = [];
+    for (let back = days - 1; back >= 0; back--) {
+        const { year, month, day } = zonedDateParts(
+            new Date(now.getTime() - back * 24 * 60 * 60 * 1000),
+            MONITOR_TIME_ZONE
+        );
+        dates.push(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
+    }
+    return [...new Set(dates)];
+}
+
+// When a history line's snapshot was taken, from its `t` ("2026-11-24T14:45:02"); null when unreadable.
+function historyLineTime(t) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})$/.exec(String(t ?? ""));
+    if (!match) return null;
+    const [year, month, day, hour, minute, second] = match.slice(1).map(Number);
+    return zonedWallTimeToEpoch({ year, month, day, hour, minute, second }, MONITOR_TIME_ZONE);
+}
+
+// A history file's lines as points ({ at, ...line }), skipping what does not parse.
+function parseHistoryLines(text) {
+    const points = [];
+    for (const line of String(text ?? "").split("\n")) {
+        if (!line.trim()) continue;
+        try {
+            const parsed = JSON.parse(line);
+            const at = historyLineTime(parsed?.t);
+            if (at !== null) points.push({ ...parsed, at });
+        } catch {
+            /* a torn or malformed line */
+        }
+    }
+    return points;
+}
+
+// The history of the last `days` days, oldest first. A day with no file yet is skipped.
+async function fetchMonitorHistory(days, now = new Date()) {
+    const texts = await Promise.all(
+        // A range of whole days still starts part way into the day before it.
+        historyDays(days + 1, now).map((date) =>
+            fetchGlobalLogsText(MONITOR_HISTORY_BRANCH, `history/${date}.jsonl`).catch(() => null)
+        )
+    );
+    const since = now.getTime() - days * 24 * 60 * 60 * 1000;
+    const points = texts
+        .flatMap((text) => parseHistoryLines(text))
+        .filter((point) => point.at >= since)
+        .sort((a, b) => a.at - b.at);
+    return points;
+}
+
+// The pending reasons to chart, most pending over the range first, with the
+// rest folded into "Other".
+function historyReasonSeries(points) {
+    const totals = new Map();
+    for (const point of points) {
+        for (const [reason, count] of Object.entries(point.pending ?? {})) {
+            totals.set(reason, (totals.get(reason) ?? 0) + count);
+        }
+    }
+    const ranked = [...totals].sort(([a, x], [b, y]) => y - x || a.localeCompare(b)).map(([reason]) => reason);
+    const shown = ranked.length > HISTORY_MAX_REASONS + 1 ? ranked.slice(0, HISTORY_MAX_REASONS) : ranked;
+    const others = ranked.filter((reason) => !shown.includes(reason));
+    const series = shown.map((reason, index) => ({
+        name: reason,
+        color: HISTORY_SERIES_COLORS[index],
+        values: points.map((point) => point.pending?.[reason] ?? 0),
+    }));
+    if (others.length > 0) {
+        series.push({
+            name: "Other",
+            color: HISTORY_SERIES_COLORS[shown.length],
+            values: points.map((point) => others.reduce((sum, reason) => sum + (point.pending?.[reason] ?? 0), 0)),
+        });
+    }
+    return series;
+}
+
+// A "nice" upper bound for an axis: 1, 2, 2.5 or 5 times a power of ten.
+function niceCeiling(value) {
+    if (!(value > 0)) return 1;
+    const power = 10 ** Math.floor(Math.log10(value));
+    const step = [1, 2, 2.5, 5, 10].find((multiple) => multiple * power >= value);
+    return step * power;
+}
+
+const formatCount = (n) => String(Math.round(n));
+const formatFactor = (n) => n.toFixed(2);
+
+const historyTimeLabel = (at) =>
+    new Date(at).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+        timeZone: MONITOR_TIME_ZONE,
+    });
+
+// Charts drawn on the page, by id, for the hover readout.
+const _historyCharts = new Map();
+let _historyChartCount = 0;
+
+const HISTORY_CHART = { width: 640, height: 150, left: 52, right: 12, top: 10, bottom: 22 };
+
+// One time-series chart as inline SVG: lines, or stacked areas with
+// `stacked`, on one y axis from 0, with a dashed `reference` line (a cap) when
+// given. Points further apart than HISTORY_GAP_MS break the marks. Returns the
+// chart's HTML and keeps what the hover readout needs.
+function renderHistoryChart({
+    title,
+    at,
+    domain = null,
+    series,
+    stacked = false,
+    reference = null,
+    format = formatCount,
+    note = "",
+    width: chartWidth = HISTORY_CHART.width,
+}) {
+    const width = historyWidth(chartWidth);
+    const id = `history-chart-${++_historyChartCount}`;
+    const { height, left, right, top, bottom } = HISTORY_CHART;
+    const plotWidth = width - left - right;
+    const plotHeight = height - top - bottom;
+    // The whole range asked for, so a stretch without snapshots shows as one.
+    const start = domain ? Math.min(domain[0], at[0]) : at[0];
+    const end = domain ? Math.max(domain[1], at[at.length - 1]) : at[at.length - 1];
+    const span = Math.max(1, end - start);
+    const x = (time) => left + ((time - start) / span) * plotWidth;
+
+    const totals = at.map((_, i) => series.reduce((sum, s) => sum + (s.values[i] ?? 0), 0));
+    const highest = Math.max(
+        0,
+        ...(stacked ? totals : series.flatMap((s) => s.values.filter((v) => v !== null && v !== undefined))),
+        ...(reference ? reference.values.filter((v) => v !== null && v !== undefined) : [])
+    );
+    const yMax = niceCeiling(highest);
+    const y = (value) => top + plotHeight - (value / yMax) * plotHeight;
+
+    // Runs of indices with no gap longer than HISTORY_GAP_MS between neighbors.
+    const runs = [];
+    let run = [];
+    at.forEach((time, i) => {
+        if (run.length > 0 && time - at[run[run.length - 1]] > HISTORY_GAP_MS) {
+            runs.push(run);
+            run = [];
+        }
+        run.push(i);
+    });
+    if (run.length > 0) runs.push(run);
+
+    const path = (indices, valueAt) =>
+        indices
+            .filter((i) => valueAt(i) !== null && valueAt(i) !== undefined)
+            .map((i, n) => `${n === 0 ? "M" : "L"}${x(at[i]).toFixed(1)},${y(valueAt(i)).toFixed(1)}`)
+            .join("");
+
+    let marks = "";
+    if (stacked) {
+        const base = at.map(() => 0);
+        for (const s of series) {
+            const lower = [...base];
+            s.values.forEach((value, i) => (base[i] += value ?? 0));
+            const upper = [...base];
+            for (const indices of runs) {
+                const top = indices.map((i) => `${x(at[i]).toFixed(1)},${y(upper[i]).toFixed(1)}`);
+                const bottom = [...indices].reverse().map((i) => `${x(at[i]).toFixed(1)},${y(lower[i]).toFixed(1)}`);
+                marks += `<path class="history-band" d="M${top.join("L")}L${bottom.join("L")}Z" fill="${e(s.color)}"/>`;
+            }
+        }
+    } else {
+        for (const s of series) {
+            for (const indices of runs) {
+                const present = indices.filter((i) => s.values[i] !== null && s.values[i] !== undefined);
+                // A lone value makes no line, so it gets a marker instead.
+                if (present.length === 1) {
+                    const [i] = present;
+                    marks += `<circle class="history-point" cx="${x(at[i]).toFixed(1)}" cy="${y(s.values[i]).toFixed(1)}" r="4" fill="${e(s.color)}"/>`;
+                    continue;
+                }
+                const d = path(indices, (i) => s.values[i]);
+                if (d) marks += `<path class="history-line" d="${d}" stroke="${e(s.color)}"/>`;
+            }
+        }
+    }
+    // A cap is configuration, not a sample: it holds from where it is first known until it
+    // changes, and the last one known holds to the end of the range.
+    if (reference) {
+        const known = at
+            .map((_, i) => i)
+            .filter((i) => reference.values[i] !== null && reference.values[i] !== undefined);
+        let d = "";
+        known.forEach((i, n) => {
+            const level = y(reference.values[i]).toFixed(1);
+            const until = n + 1 < known.length ? x(at[known[n + 1]]) : x(end);
+            d += `${n === 0 || reference.values[i] !== reference.values[known[n - 1]] ? `M${x(at[i]).toFixed(1)},${level}` : ""}L${until.toFixed(1)},${level}`;
+        });
+        if (d) marks += `<path class="history-reference" d="${d}"/>`;
+        if (known.length > 0) {
+            const last = reference.values[known[known.length - 1]];
+            marks += `<text class="history-tick history-reference-label" x="${width - right}" y="${(y(last) - 5).toFixed(1)}" text-anchor="end">${e(`${reference.name} ${format(last)}`)}</text>`;
+        }
+    }
+
+    const yTicks = [0, yMax / 2, yMax]
+        .map(
+            (value) =>
+                `<line class="history-grid" x1="${left}" x2="${width - right}" y1="${y(value)}" y2="${y(value)}"/>` +
+                `<text class="history-tick" x="${left - 6}" y="${y(value) + 4}" text-anchor="end">${e(format(value))}</text>`
+        )
+        .join("");
+    // One x label per day boundary (US Eastern midnight) when the range spans days, else every few hours.
+    const xTicks = [];
+    const daySpan = span > 36 * 60 * 60 * 1000;
+    const stepMs = daySpan ? 24 * 60 * 60 * 1000 : 6 * 60 * 60 * 1000;
+    // About one label per 70 px of plot, so they never crowd on a narrow screen.
+    const everyNth = Math.max(1, Math.ceil(span / stepMs / Math.max(2, Math.floor(plotWidth / 70))));
+    let count = 0;
+    for (let time = start - (start % (60 * 60 * 1000)); time <= end; time += 60 * 60 * 1000) {
+        const parts = zonedDateParts(new Date(time), MONITOR_TIME_ZONE);
+        const boundary = daySpan ? parts.hour === 0 : parts.hour % 6 === 0;
+        if (!boundary || time < start) continue;
+        if (count++ % everyNth !== 0) continue;
+        const label = daySpan
+            ? new Date(time).toLocaleDateString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                  timeZone: MONITOR_TIME_ZONE,
+              })
+            : `${parts.hour}:00`;
+        xTicks.push(
+            `<text class="history-tick" x="${x(time).toFixed(1)}" y="${height - 6}" text-anchor="middle">${e(label)}</text>`
+        );
+    }
+
+    const legend =
+        series.length > 1
+            ? `<div class="history-legend">${series
+                  .map(
+                      (s) =>
+                          `<span class="history-key"><span class="history-key-line" style="background: ${e(s.color)}"></span>${e(s.name)}</span>`
+                  )
+                  .join(
+                      ""
+                  )}${reference ? `<span class="history-key"><span class="history-key-line history-key-reference"></span>${e(reference.name)}</span>` : ""}</div>`
+            : reference
+              ? `<div class="history-legend"><span class="history-key"><span class="history-key-line" style="background: ${e(series[0].color)}"></span>${e(series[0].name)}</span><span class="history-key"><span class="history-key-line history-key-reference"></span>${e(reference.name)}</span></div>`
+              : "";
+
+    _historyCharts.set(id, {
+        at,
+        series,
+        reference,
+        stacked,
+        format,
+        x,
+        start,
+        span,
+        width,
+        plot: { left, plotWidth },
+    });
+    return `<figure class="history-chart" data-history-chart="${id}">
+<figcaption class="history-title"><span>${e(title)}</span>${note ? `<span class="history-note">${e(note)}</span>` : ""}</figcaption>
+${legend}
+<div class="history-plot">
+<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="img" aria-label="${e(title)}">${yTicks}${marks}${xTicks.join("")}<line class="history-crosshair" x1="0" x2="0" y1="${top}" y2="${top + plotHeight}" visibility="hidden"/></svg>
+<div class="history-tooltip" hidden></div>
+</div>
+</figure>`;
+}
+
+// Moves a chart's crosshair to the snapshot nearest the pointer and fills its readout.
+function showHistoryReadout(figure, clientX) {
+    const chart = _historyCharts.get(figure.getAttribute("data-history-chart"));
+    const svg = figure.querySelector("svg");
+    if (!chart || !svg) return;
+    const box = svg.getBoundingClientRect();
+    const viewX = ((clientX - box.left) / Math.max(1, box.width)) * chart.width;
+    const time = chart.start + ((viewX - chart.plot.left) / chart.plot.plotWidth) * chart.span;
+    let nearest = 0;
+    let low = 0;
+    let high = chart.at.length - 1;
+    while (low <= high) {
+        const mid = (low + high) >> 1;
+        if (chart.at[mid] < time) low = mid + 1;
+        else high = mid - 1;
+    }
+    nearest =
+        [low - 1, low]
+            .filter((i) => i >= 0 && i < chart.at.length)
+            .sort((a, b) => Math.abs(chart.at[a] - time) - Math.abs(chart.at[b] - time))[0] ?? 0;
+    const lineX = chart.x(chart.at[nearest]);
+    const crosshair = svg.querySelector(".history-crosshair");
+    crosshair.setAttribute("x1", lineX);
+    crosshair.setAttribute("x2", lineX);
+    crosshair.setAttribute("visibility", "visible");
+
+    const tooltip = figure.querySelector(".history-tooltip");
+    tooltip.replaceChildren();
+    const heading = document.createElement("div");
+    heading.className = "history-tooltip-time";
+    heading.textContent = historyTimeLabel(chart.at[nearest]);
+    tooltip.appendChild(heading);
+    const rows = chart.series.map((s) => [s.name, s.values[nearest], s.color]);
+    if (chart.reference) rows.push([chart.reference.name, chart.reference.values[nearest], null]);
+    for (const [name, value, color] of rows) {
+        const row = document.createElement("div");
+        row.className = "history-tooltip-row";
+        const key = document.createElement("span");
+        key.className = color ? "history-key-line" : "history-key-line history-key-reference";
+        if (color) key.style.background = color;
+        const strong = document.createElement("strong");
+        strong.textContent = value === null || value === undefined ? "–" : chart.format(value);
+        const label = document.createElement("span");
+        label.textContent = name;
+        row.append(key, strong, label);
+        tooltip.appendChild(row);
+    }
+    tooltip.hidden = false;
+    const share = (lineX - chart.plot.left) / chart.plot.plotWidth;
+    tooltip.style.left = share > 0.6 ? "" : `${(lineX / chart.width) * 100}%`;
+    tooltip.style.right = share > 0.6 ? `${(1 - lineX / chart.width) * 100}%` : "";
+}
+
+function hideHistoryReadout(figure) {
+    figure.querySelector(".history-crosshair")?.setAttribute("visibility", "hidden");
+    const tooltip = figure.querySelector(".history-tooltip");
+    if (tooltip) tooltip.hidden = true;
+}
+
+// The memory charts: one per capped QOS with its cap, or, for a history from
+// before the caps were recorded, one per partition whose jobs held memory.
+function historyMemoryCharts(points, at, domain = null, width = HISTORY_CHART.width) {
+    const qosNames = [...new Set(points.flatMap((point) => Object.keys(point.qos ?? {})))].sort();
+    const charts = [];
+    for (const name of qosNames) {
+        const held = points.map((point) => point.qos?.[name]?.mem ?? (point.qos ? 0 : null));
+        const cap = points.map((point) => point.qos?.[name]?.mem_cap ?? null);
+        charts.push(
+            renderHistoryChart({
+                title: `Memory held under QOS ${name} (GB)`,
+                at,
+                domain,
+                width,
+                width,
+                series: [{ name: "Held by running jobs", color: HISTORY_SERIES_COLORS[0], values: held }],
+                reference: cap.some((value) => value !== null) ? { name: "Per-user cap", values: cap } : null,
+            })
+        );
+    }
+    if (charts.length > 0) return charts;
+    const partitions = [...new Set(points.flatMap((point) => Object.keys(point.partitions ?? {})))]
+        .filter((name) => points.some((point) => (point.partitions?.[name]?.mem ?? 0) > 0))
+        .sort();
+    for (const name of partitions) {
+        charts.push(
+            renderHistoryChart({
+                title: `Memory held in ${name} (GB)`,
+                note: "caps not recorded in this range",
+                at,
+                domain,
+                width,
+                width,
+                series: [
+                    {
+                        name: "Held by running jobs",
+                        color: HISTORY_SERIES_COLORS[0],
+                        values: points.map((point) => point.partitions?.[name]?.mem ?? 0),
+                    },
+                ],
+            })
+        );
+    }
+    return charts;
+}
+
+// An hourly table of what the charts show, the first snapshot of each hour.
+function renderHistoryTable(points, reasons) {
+    const hourly = [];
+    let lastHour = null;
+    for (const point of points) {
+        const hour = Math.floor(point.at / (60 * 60 * 1000));
+        if (hour !== lastHour) hourly.push(point);
+        lastHour = hour;
+    }
+    const qosNames = [...new Set(points.flatMap((point) => Object.keys(point.qos ?? {})))].sort();
+    const head = [
+        "Time",
+        "Running",
+        "Pending",
+        ...reasons.map((s) => s.name),
+        ...qosNames.map((name) => `${name} GB / cap`),
+        "Fair-share",
+        "Median priority",
+    ];
+    const index = new Map(points.map((point, i) => [point, i]));
+    const rows = hourly.map((point) => {
+        const i = index.get(point);
+        const qosCells = qosNames.map((name) => {
+            const usage = point.qos?.[name];
+            return usage ? `${formatCount(usage.mem ?? 0)} / ${usage.mem_cap ?? "–"}` : "–";
+        });
+        return [
+            historyTimeLabel(point.at),
+            point.jobs?.R ?? 0,
+            point.jobs?.PD ?? 0,
+            ...reasons.map((s) => s.values[i]),
+            ...qosCells,
+            point.fairshare === undefined ? "–" : formatFactor(point.fairshare),
+            point.priority?.median ?? "–",
+        ];
+    });
+    const headHtml = head.map((label) => `<th scope="col">${e(label)}</th>`).join("");
+    const bodyHtml = rows
+        .reverse()
+        .map((row) => `<tr>${row.map((cell) => `<td>${e(String(cell))}</td>`).join("")}</tr>`)
+        .join("");
+    return `<details class="history-table"><summary>Table (hourly)</summary><div class="history-table-scroll"><table class="squeue-table"><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div></details>`;
+}
+
+// A range in days the page offers, and a chart width in whole pixels: both are written into
+// HTML, so anything else falls back to the defaults.
+const historyRange = (days) => (HISTORY_RANGES_DAYS.includes(Number(days)) ? Number(days) : HISTORY_DEFAULT_RANGE_DAYS);
+const historyWidth = (width) =>
+    Number.isFinite(Number(width)) && Number(width) > 0 ? Math.round(Number(width)) : HISTORY_CHART.width;
+
+// The history section's screen for `points` over `days`.
+function renderHistoryCharts(points, rangeDays, now = Date.now(), chartWidth = HISTORY_CHART.width) {
+    const days = historyRange(rangeDays);
+    const width = historyWidth(chartWidth);
+    _historyCharts.clear();
+    if (!points || points.length === 0) {
+        return `<p class="sched-note">No history for the last ${days === 1 ? "day" : `${days} days`} yet. The runner publishes it to the ${e(MONITOR_HISTORY_BRANCH)} branch every hour.</p>`;
+    }
+    const at = points.map((point) => point.at);
+    const domain = [now - days * 24 * 60 * 60 * 1000, now];
+    const reasons = historyReasonSeries(points);
+    let html = "";
+    html += renderHistoryChart({
+        title: "Pending jobs by reason",
+        at,
+        domain,
+        width,
+        series:
+            reasons.length > 0
+                ? reasons
+                : [{ name: "Pending", color: HISTORY_SERIES_COLORS[0], values: at.map(() => 0) }],
+        stacked: true,
+        note: "a pending job array counts once",
+    });
+    html += historyMemoryCharts(points, at, domain, width).join("");
+    if (points.some((point) => point.fairshare !== undefined)) {
+        html += renderHistoryChart({
+            title: "Fair-share factor",
+            note: "near 1 means little recent usage against the account's share",
+            at,
+            domain,
+            width,
+            series: [
+                {
+                    name: "Fair-share factor",
+                    color: HISTORY_SERIES_COLORS[0],
+                    values: points.map((p) => p.fairshare ?? null),
+                },
+            ],
+            format: formatFactor,
+        });
+    }
+    if (points.some((point) => point.priority)) {
+        html += renderHistoryChart({
+            title: "Median priority of pending jobs",
+            at,
+            domain,
+            width,
+            series: [
+                {
+                    name: "Median priority",
+                    color: HISTORY_SERIES_COLORS[0],
+                    values: points.map((p) => p.priority?.median ?? null),
+                },
+            ],
+        });
+    }
+    html += renderHistoryTable(points, reasons);
+    return html;
+}
+
+function renderHistoryRanges(rangeDays) {
+    const selected = historyRange(rangeDays);
+    const buttons = HISTORY_RANGES_DAYS.map(
+        (days) =>
+            `<button type="button" class="history-range${days === selected ? " history-range-active" : ""}" data-history-range="${days}" aria-pressed="${days === selected}">${days === 1 ? "24 h" : `${days} d`}</button>`
+    ).join("");
+    return `<span class="history-ranges" role="group" aria-label="Time range">${buttons}</span>`;
+}
+
+// The history widget: a terminal-style frame with the range control in its bar
+// and the charts below. `state` is { days, points, error }; `points` is
+// undefined while loading.
+// `width` is the charts' width in pixels, so they are drawn at their size rather than stretched.
+function renderQueueHistory(
+    { days: rangeDays = HISTORY_DEFAULT_RANGE_DAYS, points = undefined, error = null } = {},
+    chartWidth = HISTORY_CHART.width
+) {
+    const days = historyRange(rangeDays);
+    const width = historyWidth(chartWidth);
+    let status = "";
+    let body;
+    if (points === undefined && !error) {
+        status = renderSqueueStatus("connecting", "loading");
+        body = "";
+    } else if (error && !points) {
+        status = renderSqueueStatus("error", "unavailable");
+        body = `<pre class="squeue-text squeue-stderr">${e(error)}</pre>`;
+    } else {
+        body = renderHistoryCharts(points, days, Date.now(), width);
+        if (error) status = `<span class="squeue-refresh-failed" title="${e(error)}">refresh failed</span>`;
+    }
+    const source = `${GLOBAL_LOGS_REPO_URL}/tree/${MONITOR_HISTORY_BRANCH}/history`;
+    return `
+<div class="squeue-bar">
+    <span class="squeue-dots" aria-hidden="true"><span></span><span></span><span></span></span>
+    ${renderHistoryRanges(days)}
+    <span class="squeue-bar-spacer"></span>
+    ${status}<a class="squeue-source" href="${e(source)}" target="_blank" rel="noopener">${e(MONITOR_HISTORY_BRANCH)} ↗</a>
+</div>
+<div class="history-screen">${body}</div>`;
+}
+
+function createQueueHistory() {
+    let state = { days: HISTORY_DEFAULT_RANGE_DAYS, points: undefined, error: null };
+    let element = null;
+    let timer = null;
+    let loading = 0;
+
+    // The screen's padding is 14 px on each side.
+    const chartWidth = () => Math.max(280, Math.round((element?.clientWidth || HISTORY_CHART.width + 28) - 28));
+    let drawnWidth = null;
+    function draw() {
+        if (!element) return;
+        drawnWidth = chartWidth();
+        element.innerHTML = renderQueueHistory(state, drawnWidth);
+    }
+    let resizeTimer = null;
+    function onResize() {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(() => {
+            if (element && chartWidth() !== drawnWidth) draw();
+        }, 150);
+    }
+
+    async function load() {
+        const ticket = ++loading;
+        const days = state.days;
+        try {
+            const points = await fetchMonitorHistory(days);
+            if (ticket !== loading) return;
+            state = { ...state, points, error: null };
+        } catch (err) {
+            if (ticket !== loading) return;
+            state = { ...state, error: `Could not load the queue history: ${err.message || err}` };
+        }
+        draw();
+    }
+
+    function onClick(event) {
+        const button = event.target?.closest?.("[data-history-range]");
+        if (!button) return;
+        const days = Number(button.getAttribute("data-history-range"));
+        if (!HISTORY_RANGES_DAYS.includes(days) || days === state.days) return;
+        state = { days, points: undefined, error: null };
+        draw();
+        load();
+    }
+
+    function onPointer(event) {
+        const figure = event.target?.closest?.(".history-chart");
+        if (!figure) return;
+        if (event.type === "pointerleave") hideHistoryReadout(figure);
+        else showHistoryReadout(figure, event.clientX);
+    }
+
+    function init({ container }) {
+        if (!container) return Promise.resolve();
+        element = document.createElement("section");
+        element.id = "queue-history";
+        element.className = "squeue-monitor history-monitor";
+        element.setAttribute("aria-label", "Queue history from MIT Engaging");
+        container.replaceChildren(element);
+        element.addEventListener("click", onClick);
+        element.addEventListener("pointermove", onPointer);
+        element.addEventListener("pointerleave", (event) => {
+            element.querySelectorAll(".history-chart").forEach(hideHistoryReadout);
+        });
+        draw();
+        if (timer === null) {
+            timer = setInterval(() => {
+                if (document.visibilityState !== "hidden") load();
+            }, HISTORY_POLL_INTERVAL_MS);
+            window.addEventListener("resize", onResize);
+        }
+        return load();
+    }
+
+    function stop() {
+        if (timer !== null) clearInterval(timer);
+        timer = null;
+        window.removeEventListener("resize", onResize);
+        element = null;
+        state = { days: HISTORY_DEFAULT_RANGE_DAYS, points: undefined, error: null };
+        _historyCharts.clear();
+    }
+
+    return { init, stop };
+}
+
+const queueHistory = createQueueHistory();
+const initQueueHistory = (options) => queueHistory.init(options);
 
 /* ─── Status page ───────────────────────────────────────────── */
 function renderStatusPage() {
@@ -3976,6 +4966,10 @@ function renderStatusPage() {
         <h2 class="status-heading" id="status-queue-heading">SLURM Queue</h2>
         <div id="status-queue"></div>
         <div id="queue-priorities" class="queue-priorities" style="display: none"></div>
+    </section>
+    <section class="status-section" aria-labelledby="status-history-heading">
+        <h2 class="status-heading" id="status-history-heading">Queue History</h2>
+        <div id="status-history"></div>
     </section>
     <section class="status-section" aria-labelledby="status-disk-heading">
         <h2 class="status-heading" id="status-disk-heading">Disk Usage</h2>
@@ -8662,8 +9656,9 @@ async function init() {
         // Nothing else to load: the monitors are the page.
         document.getElementById("runs").innerHTML = renderStatusPage();
         showDiffResults();
-        initSqueueMonitor({ container: document.getElementById("status-queue") });
+        initSqueueMonitor({ container: document.getElementById("status-queue"), scheduling: true });
         initQueuePriorities();
+        initQueueHistory({ container: document.getElementById("status-history") });
         initDiskMonitor({ container: document.getElementById("status-disk") });
         return;
     }
@@ -8799,6 +9794,23 @@ if (typeof module !== "undefined" && module.exports) {
         refreshDiskMonitor,
         renderSqueueMonitor,
         renderDiskMonitor,
+        renderSchedulingPanel,
+        historyDays,
+        historyLineTime,
+        parseHistoryLines,
+        fetchMonitorHistory,
+        historyReasonSeries,
+        niceCeiling,
+        renderHistoryCharts,
+        renderQueueHistory,
+        initQueueHistory,
+        parsePipeTables,
+        parseSlurmMemoryGb,
+        parseTres,
+        squeueJobs,
+        summarizePendingReasons,
+        qosUsage,
+        parseLimits,
         renderStatusPage,
         stopMonitors,
         summarizeSqueueJobs,
