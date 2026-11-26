@@ -19,4 +19,5 @@
 
 ### 🐛 Bug Fix
 
+- Grouped visualization plots by their full folder, so each probe's quality control plots stay apart and each QC card shows its own probe's plot. ([#229](https://github.com/dandi-compute/dandi-compute-page/pull/229))
 - Fixed the home directory's quota report showing as raw text instead of being read, because of its "Last updated" line. ([#224](https://github.com/dandi-compute/dandi-compute-page/pull/224))

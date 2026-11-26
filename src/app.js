@@ -3,7 +3,7 @@
    TODO: once this project migrates to TS + Vite, source this from
    package.json directly (e.g. via Vite's `define`) instead of duplicating
    it here. */
-const APP_VERSION = "1.7.0";
+const APP_VERSION = "1.7.1";
 const OWNER = "dandi-compute";
 const REPO = "001697";
 const BRANCH = "draft";
@@ -2109,9 +2109,10 @@ async function fetchDatasetDescription(run) {
 
 // Build the visualization recording groups for a run from its S3 blob map.
 // PNGs live under "{run.path}/derivatives/visualization/..." (or the legacy
-// "{run.path}/visualization/..."). Images inside a recording subdirectory are
-// grouped under that subdirectory's name; images directly under visualization/
-// are grouped under a synthetic "summary" recording. Sourced entirely from the
+// "{run.path}/visualization/..."). Images are grouped under the full path of
+// their subdirectory, so the per-probe "quality_control/<probe>/" folders, whose
+// plots share file names, stay apart. Images directly under visualization/ are
+// grouped under a synthetic "summary" recording. Sourced entirely from the
 // per-entry output_paths map — no directory listing required.
 function fetchVisualizationData(run) {
     const outputPaths = run?.outputPaths;
@@ -2124,7 +2125,7 @@ function fetchVisualizationData(run) {
         const prefix = prefixes.find((p) => repoPath.startsWith(p));
         if (!prefix) continue;
         const relative = repoPath.slice(prefix.length); // e.g. "rec1/drift_map.png" or "psd.png"
-        const slashIndex = relative.indexOf("/");
+        const slashIndex = relative.lastIndexOf("/");
         const groupName = slashIndex === -1 ? "summary" : relative.slice(0, slashIndex);
         const baseName = relative.slice(relative.lastIndexOf("/") + 1);
         const url = blobUrl(blobId);
@@ -5578,13 +5579,16 @@ function qcLinkifyDescription(text) {
 }
 
 // Best-effort match of a metric "reference" (e.g.
-// "quality_control/<probe>/traces_raw.png") to one of the run's known viz images,
-// preferring an image whose recording group matches the probe segment.
+// "quality_control/<probe>/traces_raw.png") to one of the run's known viz images.
+// The image at exactly that path beside quality_control.json wins. Otherwise,
+// as for runs that flattened the plots, an image of the same name is chosen,
+// preferring one whose recording group matches the probe segment.
 function qcResolveReference(reference, vizData) {
     if (!reference || !Array.isArray(vizData)) return null;
     const segments = reference.split("/").filter(Boolean);
     const fileName = segments[segments.length - 1];
     const probe = segments.length >= 2 ? segments[segments.length - 2] : null;
+    const referenceDirectory = segments.slice(0, -1).join("/");
     const candidates = [];
     for (const rec of vizData) {
         for (const img of rec.images) {
@@ -5592,6 +5596,8 @@ function qcResolveReference(reference, vizData) {
         }
     }
     if (candidates.length === 0) return null;
+    const exact = candidates.find((c) => c.recording === referenceDirectory);
+    if (exact) return exact;
     if (candidates.length === 1 || !probe) return candidates[0];
     const preferred = candidates.find((c) => c.recording.includes(probe) || probe.includes(c.recording));
     return preferred ?? candidates[0];
@@ -9811,6 +9817,7 @@ if (typeof module !== "undefined" && module.exports) {
         archiveStateCacheKey,
         fetchSlurmLogs,
         fetchVisualizationData,
+        partitionQcPlots,
         initModal,
         initCopyCodeButtons,
         curationScript,

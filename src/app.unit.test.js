@@ -67,6 +67,7 @@ const {
     archiveStateCacheKey,
     fetchSlurmLogs,
     fetchVisualizationData,
+    partitionQcPlots,
     initModal,
     initCopyCodeButtons,
     curationScript,
@@ -2356,11 +2357,58 @@ describe("fetchVisualizationData", () => {
         expect(result).toBeNull();
     });
 
+    it("keeps the quality control plots of each probe in their own group", async () => {
+        const runPath = "derivatives/dandiset-000001/sub-A/pipeline-test/version-v1/params-abc_attempt-1";
+        const result = await fetchVisualizationData({
+            path: runPath,
+            outputPaths: {
+                [`${runPath}/derivatives/visualization/quality_control/ProbeA/drift_map.png`]: "aaaaaa111111",
+                [`${runPath}/derivatives/visualization/quality_control/ProbeB/drift_map.png`]: "bbbbbb222222",
+                [`${runPath}/derivatives/visualization/quality_control/ProbeB/traces_raw.pdf`]: "cccccc333333",
+            },
+        });
+
+        expect(result.map((recording) => recording.name)).toEqual(["quality_control/ProbeA", "quality_control/ProbeB"]);
+        expect(result[0].images.map((image) => image.name)).toEqual(["drift_map.png"]);
+        expect(result[0].images[0].url).toContain("aaaaaa111111");
+        expect(result[1].images[0].url).toContain("bbbbbb222222");
+    });
+
     it("returns null on network error", async () => {
         const result = await fetchVisualizationData({
             path: "derivatives/dandiset-000001/sub-A/pipeline-test/version-v1/params-abc_attempt-1",
         });
         expect(result).toBeNull();
+    });
+});
+
+describe("partitionQcPlots", () => {
+    it.each([
+        ["ProbeA", "aaaaaa111111"],
+        ["ProbeB", "bbbbbb222222"],
+    ])("attaches the plot of %s that its reference names, among plots of the same name", (probe, expectedBlob) => {
+        const vizData = [
+            { name: "quality_control/ProbeA", images: [{ name: "drift_map.png", url: "https://x/aaaaaa111111" }] },
+            { name: "quality_control/ProbeB", images: [{ name: "drift_map.png", url: "https://x/bbbbbb222222" }] },
+        ];
+        const qc = { metrics: [{ name: "Drift map", reference: `quality_control/${probe}/drift_map.png` }] };
+
+        const remaining = partitionQcPlots(qc, vizData);
+
+        expect(qc.metrics[0].plot.url).toBe(`https://x/${expectedBlob}`);
+        expect(remaining).toBeNull();
+    });
+
+    it("falls back to the plot in the group named after the probe when no plot sits at the reference's path", () => {
+        const vizData = [
+            { name: "ProbeA", images: [{ name: "drift_map.png", url: "https://x/aaaaaa111111" }] },
+            { name: "ProbeB", images: [{ name: "drift_map.png", url: "https://x/bbbbbb222222" }] },
+        ];
+        const qc = { metrics: [{ name: "Drift map", reference: "quality_control/ProbeB/drift_map.png" }] };
+
+        partitionQcPlots(qc, vizData);
+
+        expect(qc.metrics[0].plot.url).toBe("https://x/bbbbbb222222");
     });
 });
 
