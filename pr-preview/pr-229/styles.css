@@ -467,6 +467,222 @@ h1 {
     margin-top: 14px;
 }
 
+/* The scheduling panel under the squeue terminal on the Status page. */
+.sched-panel {
+    padding: 4px 14px 14px;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.8em;
+    line-height: 1.5;
+    color: var(--squeue-text);
+    overflow-x: auto;
+}
+.sched-caption {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 2px 16px;
+    margin-top: 12px;
+    padding: 0 0 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--squeue-dim);
+    font-weight: 600;
+}
+.sched-caption-note {
+    font-weight: 400;
+}
+.sched-reasons,
+.sched-facts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 8px 0 4px;
+}
+.sched-reason {
+    padding: 0 6px;
+    border-radius: 3px;
+    color: var(--color-stalled);
+    background: rgba(224, 123, 58, 0.15);
+    font-weight: 600;
+    cursor: help;
+}
+.sched-count {
+    color: var(--squeue-text);
+}
+.sched-fact-label,
+.sched-note {
+    color: var(--squeue-dim);
+}
+.sched-note {
+    margin: 8px 0 4px;
+}
+.sched-panel .disk-meters {
+    margin-top: 4px;
+}
+.sched-limits {
+    margin-top: 12px;
+}
+.sched-limits summary {
+    color: var(--squeue-dim);
+    font-weight: 600;
+    cursor: pointer;
+}
+.sched-table + .sched-table {
+    margin-top: 10px;
+}
+
+/* The queue history on the Status page: charts in a terminal-style frame. */
+.history-screen {
+    padding: 6px 14px 14px;
+    font-family: "SFMono-Regular", "Cascadia Code", "Consolas", monospace;
+    font-size: 0.8em;
+    line-height: 1.5;
+    color: var(--squeue-text);
+}
+.history-ranges {
+    display: inline-flex;
+    gap: 4px;
+}
+.history-range {
+    padding: 1px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 3px;
+    background: transparent;
+    color: var(--squeue-dim);
+    font: inherit;
+    cursor: pointer;
+}
+.history-range:hover {
+    color: var(--squeue-text);
+}
+.history-range-active {
+    border-color: var(--color-accent);
+    color: var(--squeue-text);
+}
+.history-chart {
+    margin: 12px 0 0;
+}
+.history-title {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 2px 16px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    color: var(--squeue-dim);
+    font-weight: 600;
+}
+.history-note {
+    font-weight: 400;
+}
+.history-legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 14px;
+    padding: 6px 0 2px;
+    color: var(--squeue-text);
+}
+.history-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+.history-key-line {
+    display: inline-block;
+    width: 14px;
+    height: 2px;
+    border-radius: 1px;
+}
+.history-key-reference {
+    background: repeating-linear-gradient(90deg, var(--squeue-dim) 0 4px, transparent 4px 7px);
+}
+.history-plot {
+    position: relative;
+}
+.history-plot svg {
+    display: block;
+    width: 100%;
+    height: 150px;
+    overflow: visible;
+}
+.history-grid {
+    stroke: rgba(255, 255, 255, 0.07);
+    stroke-width: 1;
+}
+.history-tick {
+    fill: var(--squeue-dim);
+    font-size: 10px;
+    font-family: inherit;
+}
+.history-line {
+    fill: none;
+    stroke-width: 2;
+    stroke-linejoin: round;
+    vector-effect: non-scaling-stroke;
+}
+.history-band {
+    stroke: var(--squeue-bg);
+    stroke-width: 1;
+    vector-effect: non-scaling-stroke;
+}
+.history-point {
+    stroke: var(--squeue-bg);
+    stroke-width: 2;
+    vector-effect: non-scaling-stroke;
+}
+.history-reference {
+    fill: none;
+    stroke: var(--squeue-dim);
+    stroke-width: 1.5;
+    stroke-dasharray: 5 4;
+    vector-effect: non-scaling-stroke;
+}
+.history-crosshair {
+    stroke: var(--squeue-text);
+    stroke-width: 1;
+    opacity: 0.5;
+    vector-effect: non-scaling-stroke;
+}
+.history-tooltip {
+    position: absolute;
+    top: 4px;
+    z-index: 2;
+    min-width: 12em;
+    margin: 0 8px;
+    padding: 6px 9px;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 4px;
+    background: var(--squeue-bar-bg);
+    pointer-events: none;
+}
+.history-tooltip-time {
+    margin-bottom: 2px;
+    color: var(--squeue-dim);
+}
+.history-tooltip-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    white-space: nowrap;
+}
+.history-tooltip-row strong {
+    min-width: 3.5em;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+}
+.history-table {
+    margin-top: 14px;
+}
+.history-table summary {
+    color: var(--squeue-dim);
+    font-weight: 600;
+    cursor: pointer;
+}
+.history-table-scroll {
+    max-height: 20em;
+    overflow: auto;
+}
+
 /* ─── Status page ───────────────────────────────────────────── */
 .status-page {
     display: flex;
